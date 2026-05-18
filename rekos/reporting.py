@@ -1,0 +1,55 @@
+"""Report rendering for case snapshots."""
+
+from __future__ import annotations
+
+from .errors import UnsupportedReportFormatError
+from .models import CaseSnapshot
+
+
+def render_report(snapshot: CaseSnapshot, report_format: str) -> str:
+    normalized_format = report_format.strip().lower()
+    if normalized_format != "md":
+        raise UnsupportedReportFormatError(f"Unsupported report format: {report_format}")
+    return render_markdown(snapshot)
+
+
+def render_markdown(snapshot: CaseSnapshot) -> str:
+    lines: list[str] = [
+        f"# REKOS Case Report: {snapshot.case.name}",
+        "",
+        "## Case",
+        f"- Created: {snapshot.case.created_at}",
+        "",
+        "## Targets",
+    ]
+
+    if snapshot.targets:
+        for target in snapshot.targets:
+            lines.append(f"- `{target.target_type}`: {target.value} ({target.added_at})")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## File Hashes"])
+    if snapshot.file_hashes:
+        for file_hash in snapshot.file_hashes:
+            lines.extend(
+                [
+                    f"- Path: `{file_hash.path}`",
+                    f"  - SHA-256: `{file_hash.sha256}`",
+                    f"  - Size: {file_hash.size_bytes} bytes",
+                    f"  - Added: {file_hash.added_at}",
+                ]
+            )
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Notes"])
+    if snapshot.notes:
+        for note in snapshot.notes:
+            lines.append(f"- {note.text} ({note.added_at})")
+    else:
+        lines.append("- None recorded")
+
+    lines.append("")
+    return "\n".join(lines)
+
