@@ -43,6 +43,33 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("- None recorded")
 
+    lines.extend(["", "## Metadata Findings"])
+    if snapshot.metadata:
+        for metadata in snapshot.metadata:
+            lines.extend(
+                [
+                    f"- File: `{metadata.path}`",
+                    f"  - Tools: {metadata.tools}",
+                    f"  - Export: `{metadata.export_path}`",
+                    f"  - Added: {metadata.added_at}",
+                ]
+            )
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Username Scans"])
+    if snapshot.username_scans:
+        for scan in snapshot.username_scans:
+            lines.extend(
+                [
+                    f"- Username: `{scan.username}`",
+                    f"  - Export: `{scan.export_path}`",
+                    f"  - Added: {scan.added_at}",
+                ]
+            )
+    else:
+        lines.append("- None recorded")
+
     lines.extend(["", "## Notes"])
     if snapshot.notes:
         for note in snapshot.notes:
@@ -52,4 +79,3 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
 
     lines.append("")
     return "\n".join(lines)
-

@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Iterator
 
 from .errors import CaseExistsError, CaseNotFoundError
-from .models import CaseRecord, CaseSnapshot, FileHashRecord, NoteRecord, TargetRecord
+from .models import (
+    CaseRecord,
+    CaseSnapshot,
+    FileHashRecord,
+    MetadataRecord,
+    NoteRecord,
+    TargetRecord,
+    UsernameScanRecord,
+)
 from .paths import case_path, database_path, validate_case_name
 
 
@@ -79,6 +87,56 @@ class CaseStore:
             added_at=added_at,
         )
 
+    def add_metadata_result(
+        self,
+        case: str,
+        file_path: Path,
+        tools: list[str],
+        raw_output: str,
+        export_path: Path,
+    ) -> MetadataRecord:
+        added_at = utc_now_iso()
+        record = MetadataRecord(
+            path=str(file_path),
+            tools=", ".join(tools),
+            raw_output=raw_output,
+            export_path=str(export_path),
+            added_at=added_at,
+        )
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO metadata_findings (path, tools, raw_output, export_path, added_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (record.path, record.tools, record.raw_output, record.export_path, record.added_at),
+            )
+        return record
+
+    def add_username_scan(
+        self,
+        case: str,
+        username: str,
+        raw_output: str,
+        export_path: Path,
+    ) -> UsernameScanRecord:
+        added_at = utc_now_iso()
+        record = UsernameScanRecord(
+            username=username,
+            raw_output=raw_output,
+            export_path=str(export_path),
+            added_at=added_at,
+        )
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO username_scans (username, raw_output, export_path, added_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (record.username, record.raw_output, record.export_path, record.added_at),
+            )
+        return record
+
     def add_note(self, case: str, text: str) -> NoteRecord:
         cleaned_text = text.strip()
         if not cleaned_text:
@@ -121,6 +179,37 @@ class CaseStore:
                     "SELECT path, sha256, size_bytes, added_at FROM file_hashes ORDER BY id"
                 ).fetchall()
             ]
+            metadata = [
+                MetadataRecord(
+                    path=row["path"],
+                    tools=row["tools"],
+                    raw_output=row["raw_output"],
+                    export_path=row["export_path"],
+                    added_at=row["added_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT path, tools, raw_output, export_path, added_at
+                    FROM metadata_findings
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
+            username_scans = [
+                UsernameScanRecord(
+                    username=row["username"],
+                    raw_output=row["raw_output"],
+                    export_path=row["export_path"],
+                    added_at=row["added_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT username, raw_output, export_path, added_at
+                    FROM username_scans
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
             notes = [
                 NoteRecord(text=row["text"], added_at=row["added_at"])
                 for row in connection.execute(
@@ -132,8 +221,19 @@ class CaseStore:
             case=CaseRecord(name=case_row["name"], created_at=case_row["created_at"]),
             targets=targets,
             file_hashes=file_hashes,
+            metadata=metadata,
+            username_scans=username_scans,
             notes=notes,
         )
+
+    def exports_folder(self, case: str) -> Path:
+        folder = case_path(case, self.cases_root)
+        db_path = database_path(case, self.cases_root)
+        if not db_path.exists():
+            raise CaseNotFoundError(f"Case not found: {validate_case_name(case)}")
+        exports = folder / "exports"
+        exports.mkdir(exist_ok=True)
+        return exports
 
     @contextmanager
     def connection_for_case(self, case: str) -> Iterator[sqlite3.Connection]:
@@ -188,6 +288,22 @@ class CaseStore:
                 text TEXT NOT NULL,
                 added_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS metadata_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL,
+                tools TEXT NOT NULL,
+                raw_output TEXT NOT NULL,
+                export_path TEXT NOT NULL,
+                added_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS username_scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                raw_output TEXT NOT NULL,
+                export_path TEXT NOT NULL,
+                added_at TEXT NOT NULL
+            );
             """
         )
-

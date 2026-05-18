@@ -27,6 +27,23 @@ class FileHashRecord:
 
 
 @dataclass(frozen=True)
+class MetadataRecord:
+    path: str
+    tools: str
+    raw_output: str
+    export_path: str
+    added_at: str
+
+
+@dataclass(frozen=True)
+class UsernameScanRecord:
+    username: str
+    raw_output: str
+    export_path: str
+    added_at: str
+
+
+@dataclass(frozen=True)
 class NoteRecord:
     text: str
     added_at: str
@@ -37,5 +54,6 @@ class CaseSnapshot:
     case: CaseRecord
     targets: list[TargetRecord]
     file_hashes: list[FileHashRecord]
+    metadata: list[MetadataRecord]
+    username_scans: list[UsernameScanRecord]
     notes: list[NoteRecord]
-

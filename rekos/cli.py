@@ -11,6 +11,7 @@ from rich.console import Console
 
 from .errors import RekosError
 from .hashfile import sha256_file
+from .osint import collect_metadata, scan_username
 from .reporting import render_report
 from .storage import CaseStore
 
@@ -34,6 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     hash_file = subparsers.add_parser("hash-file", help="Hash a file and store the result in a case")
     hash_file.add_argument("case")
     hash_file.add_argument("file")
+
+    metadata = subparsers.add_parser("metadata", help="Collect passive file metadata")
+    metadata.add_argument("case")
+    metadata.add_argument("file")
+
+    username_scan = subparsers.add_parser("username-scan", help="Run a passive username scan")
+    username_scan.add_argument("case")
+    username_scan.add_argument("username")
 
     add_note = subparsers.add_parser("add-note", help="Add a note to a case")
     add_note.add_argument("case")
@@ -72,6 +81,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             console.print(f"SHA-256: [bold]{file_hash.sha256}[/bold]")
             return 0
 
+        if args.command == "metadata":
+            tools, export_path = collect_metadata(args.case, Path(args.file), store)
+            console.print(f"[green]Collected metadata[/green] with {', '.join(tools)}")
+            console.print(f"Export: {export_path}")
+            return 0
+
+        if args.command == "username-scan":
+            export_path = scan_username(args.case, args.username, store)
+            console.print(f"[green]Completed username scan[/green] {args.username}")
+            console.print(f"Export: {export_path}")
+            return 0
+
         if args.command == "add-note":
             note = store.add_note(args.case, args.text)
             console.print(f"[green]Added note[/green] ({note.added_at})")
@@ -96,4 +117,3 @@ def console_main() -> None:
 
 if __name__ == "__main__":
     console_main()
-

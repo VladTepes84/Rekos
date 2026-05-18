@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import sqlite3
 from pathlib import Path
 
-from rekos.cli import main
+from rekos.cli import build_parser, main
 
 
 def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -35,6 +36,59 @@ def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, c
     assert note_count == 1
 
 
+def test_passive_osint_commands_are_registered() -> None:
+    parser = build_parser()
+    subparser_action = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    subcommands = subparser_action.choices
+
+    assert "metadata" in subcommands
+    assert "username-scan" in subcommands
+
+
+def test_metadata_returns_clear_error_when_tools_are_missing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda _tool: None)
+    artifact = tmp_path / "artifact with spaces.txt"
+    artifact.write_text("sample\n", encoding="utf-8")
+
+    assert main(["new-case", "case-meta"]) == 0
+    assert main(["metadata", "case-meta", str(artifact)]) == 1
+
+    captured = capsys.readouterr()
+    assert "Missing metadata tool" in captured.err
+
+    db_path = tmp_path / "rekos_cases" / "case-meta" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        metadata_count = connection.execute(
+            "SELECT COUNT(*) FROM metadata_findings"
+        ).fetchone()[0]
+    assert metadata_count == 0
+
+
+def test_username_scan_returns_clear_error_when_sherlock_is_missing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda _tool: None)
+
+    assert main(["new-case", "case-user"]) == 0
+    assert main(["username-scan", "case-user", "alice.test+case"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Missing username scan tool" in captured.err
+
+    db_path = tmp_path / "rekos_cases" / "case-user" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        scan_count = connection.execute("SELECT COUNT(*) FROM username_scans").fetchone()[0]
+    assert scan_count == 0
+
+
 def test_case_name_rejects_path_traversal(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -62,4 +116,3 @@ def test_missing_case_returns_error(tmp_path: Path, monkeypatch, capsys) -> None
 
     captured = capsys.readouterr()
     assert "Case not found" in captured.err
-

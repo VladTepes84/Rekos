@@ -20,3 +20,10 @@ class InvalidCaseNameError(RekosError):
 class UnsupportedReportFormatError(RekosError):
     """Raised when a report format is not implemented."""
 
+
+class ExternalToolMissingError(RekosError):
+    """Raised when an optional passive OSINT tool is unavailable."""
+
+
+class ExternalToolExecutionError(RekosError):
+    """Raised when an optional passive OSINT tool fails."""
