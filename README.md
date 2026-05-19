@@ -1,14 +1,16 @@
 # REKOS
 
-REKOS is a local defensive case-management CLI for cybersecurity investigations.
+REKOS is a terminal-native passive OSINT CLI and public-source investigation workspace.
+
+It provides a local-first OSINT case workspace for organizing targets and evidence, correlating usernames/profiles/indicators, hashing files, recording notes, building timelines, running passive username checks, extracting metadata from user-provided files, validating cases, and exporting portable archives.
+
+REKOS is designed for lawful passive OSINT workflows. It is not a hacking, phishing, credential collection, bypass, exploitation, stalking, or doxxing tool.
+
+## Example
 
 ```bash
-rekos new-case suspicious-login
-rekos add-target suspicious-login --type username --value alice@example.com
-rekos hash-file suspicious-login ./artifact.bin
-rekos add-note suspicious-login "Initial triage note"
-rekos report suspicious-login --format md
-```
-
-Cases are stored under `~/rekos_cases/<case_name>` by default, with SQLite state inside each case folder.
-
+rekos new-case public-profile-review
+rekos add-target public-profile-review --type username --value example_user
+rekos hash-file public-profile-review ./public_artifact.png
+rekos add-note public-profile-review "Public profile observed with matching username pattern."
+rekos report public-profile-review --format md

@@ -1,4 +1,4 @@
-"""Case validation checks for local REKOS case folders."""
+"""Validation checks for local REKOS OSINT case folders."""
 
 from __future__ import annotations
 

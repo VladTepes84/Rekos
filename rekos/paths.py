@@ -1,4 +1,4 @@
-"""Path helpers for local case storage."""
+"""Path helpers for local OSINT case storage."""
 
 from __future__ import annotations
 
@@ -40,4 +40,3 @@ def database_path(name: str, cases_root: Path | None = None) -> Path:
     """Resolve the SQLite database path for a case."""
 
     return case_path(name, cases_root) / "rekos.db"
-

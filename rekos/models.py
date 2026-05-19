@@ -72,6 +72,22 @@ class TimelineEventRecord:
 
 
 @dataclass(frozen=True)
+class IocRecord:
+    ioc_type: str
+    value: str
+    note: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class IocEnrichmentRecord:
+    ioc_type: str
+    value: str
+    enrichment: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class ValidationSummaryRecord:
     status: str
     warnings: list[str]
@@ -88,4 +104,6 @@ class CaseSnapshot:
     username_scans: list[UsernameScanRecord]
     notes: list[NoteRecord]
     timeline: list[TimelineEventRecord]
+    iocs: list[IocRecord]
+    ioc_enrichments: list[IocEnrichmentRecord]
     validation: Optional[ValidationSummaryRecord]

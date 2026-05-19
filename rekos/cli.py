@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -12,6 +13,7 @@ from rich.console import Console
 from .case_export import export_case
 from .errors import RekosError
 from .hashfile import sha256_file
+from .ioc import enrich_ioc, normalize_ioc
 from .osint import collect_metadata, scan_username
 from .reporting import render_report
 from .storage import CaseStore
@@ -23,18 +25,18 @@ error_console = Console(stderr=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rekos", description="Local defensive case-management CLI")
+    parser = argparse.ArgumentParser(prog="rekos", description="Terminal-native passive OSINT CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    new_case = subparsers.add_parser("new-case", help="Create a new local case")
+    new_case = subparsers.add_parser("new-case", help="Create a local-first OSINT case workspace")
     new_case.add_argument("name")
 
-    add_target = subparsers.add_parser("add-target", help="Add a bounded case target")
+    add_target = subparsers.add_parser("add-target", help="Add a public-source target")
     add_target.add_argument("case")
     add_target.add_argument("--type", required=True, dest="target_type")
     add_target.add_argument("--value", required=True)
 
-    hash_file = subparsers.add_parser("hash-file", help="Hash a file and store the result in a case")
+    hash_file = subparsers.add_parser("hash-file", help="Hash a file and store the result locally")
     hash_file.add_argument("case")
     hash_file.add_argument("file")
 
@@ -46,18 +48,32 @@ def build_parser() -> argparse.ArgumentParser:
     username_scan.add_argument("case")
     username_scan.add_argument("username")
 
-    validate_case_parser = subparsers.add_parser("validate-case", help="Validate a local case")
+    validate_case_parser = subparsers.add_parser("validate-case", help="Validate a local OSINT workspace")
     validate_case_parser.add_argument("case")
 
-    export_case_parser = subparsers.add_parser("export-case", help="Export a local case ZIP")
+    export_case_parser = subparsers.add_parser("export-case", help="Export a local OSINT workspace ZIP")
     export_case_parser.add_argument("case")
     export_case_parser.add_argument("--output", required=True)
 
-    add_note = subparsers.add_parser("add-note", help="Add a note to a case")
+    add_ioc = subparsers.add_parser("add-ioc", help="Add a public-source indicator")
+    add_ioc.add_argument("case")
+    add_ioc.add_argument("--type", required=True, choices=["ip", "domain", "url", "hash"], dest="ioc_type")
+    add_ioc.add_argument("--value", required=True)
+    add_ioc.add_argument("--note", required=True)
+
+    list_iocs = subparsers.add_parser("list-iocs", help="List public-source indicators")
+    list_iocs.add_argument("case")
+
+    enrich_ioc_parser = subparsers.add_parser("enrich-ioc", help="Run local IOC enrichment")
+    enrich_ioc_parser.add_argument("case")
+    enrich_ioc_parser.add_argument("--type", required=True, choices=["ip", "domain", "url", "hash"], dest="ioc_type")
+    enrich_ioc_parser.add_argument("--value", required=True)
+
+    add_note = subparsers.add_parser("add-note", help="Add a workspace note")
     add_note.add_argument("case")
     add_note.add_argument("text")
 
-    report = subparsers.add_parser("report", help="Render a case report")
+    report = subparsers.add_parser("report", help="Render an OSINT workspace report")
     report.add_argument("case")
     report.add_argument("--format", default="md", choices=["md"])
 
@@ -116,6 +132,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = export_case(args.case, Path(args.output), store)
             console.print(f"[green]Exported case[/green] {args.case} to {result.output_path}")
             console.print(f"Files: {result.file_count}")
+            return 0
+
+        if args.command == "add-ioc":
+            normalized = normalize_ioc(args.ioc_type, args.value)
+            ioc = store.add_ioc(args.case, normalized.ioc_type, normalized.value, args.note)
+            console.print(f"[green]Added IOC[/green] {ioc.ioc_type}: {ioc.value}")
+            return 0
+
+        if args.command == "list-iocs":
+            iocs = store.list_iocs(args.case)
+            if not iocs:
+                console.print("No IOCs recorded")
+                return 0
+            for ioc in iocs:
+                note = f" - {ioc.note}" if ioc.note else ""
+                console.print(f"{ioc.created_at} {ioc.ioc_type}: {ioc.value}{note}")
+            return 0
+
+        if args.command == "enrich-ioc":
+            normalized, enrichment = enrich_ioc(args.ioc_type, args.value)
+            store.add_ioc_enrichment(
+                args.case,
+                normalized.ioc_type,
+                normalized.value,
+                enrichment,
+            )
+            console.print(f"[green]Enriched IOC[/green] {normalized.ioc_type}: {normalized.value}")
+            console.print(json.dumps(enrichment, sort_keys=True), markup=False)
             return 0
 
         if args.command == "add-note":

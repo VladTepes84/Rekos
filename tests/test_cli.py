@@ -15,7 +15,7 @@ from rekos.osint import _write_export
 def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     artifact = tmp_path / "artifact.txt"
-    artifact.write_text("forensic sample\n", encoding="utf-8")
+    artifact.write_text("public sample\n", encoding="utf-8")
 
     assert main(["new-case", "case-001"]) == 0
     assert main(["add-target", "case-001", "--type", "username", "--value", "alice"]) == 0
@@ -24,7 +24,7 @@ def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, c
     assert main(["report", "case-001", "--format", "md"]) == 0
 
     output = capsys.readouterr().out
-    assert "# REKOS Case Report: case-001" in output
+    assert "# REKOS OSINT Workspace Report: case-001" in output
     assert "`username`: alice" in output
     assert "Initial triage note" in output
     assert "SHA-256" in output
@@ -209,6 +209,141 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "username-scan" in subcommands
     assert "validate-case" in subcommands
     assert "export-case" in subcommands
+    assert "add-ioc" in subcommands
+    assert "list-iocs" in subcommands
+    assert "enrich-ioc" in subcommands
+
+
+def test_add_and_list_valid_iocs(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-iocs"]) == 0
+    assert main(["add-ioc", "case-iocs", "--type", "ip", "--value", "8.8.8.8", "--note", "resolver"]) == 0
+    assert main(["add-ioc", "case-iocs", "--type", "domain", "--value", "Bücher.example", "--note", "idna"]) == 0
+    assert main([
+        "add-ioc",
+        "case-iocs",
+        "--type",
+        "url",
+        "--value",
+        "https://example.com/path?x=1",
+        "--note",
+        "landing",
+    ]) == 0
+    assert main([
+        "add-ioc",
+        "case-iocs",
+        "--type",
+        "hash",
+        "--value",
+        "A" * 64,
+        "--note",
+        "payload",
+    ]) == 0
+    capsys.readouterr()
+
+    assert main(["list-iocs", "case-iocs"]) == 0
+
+    output = capsys.readouterr().out
+    assert "ip: 8.8.8.8 - resolver" in output
+    assert "domain: xn--bcher-kva.example - idna" in output
+    assert "a" * 64 in output
+
+    db_path = tmp_path / "rekos_cases" / "case-iocs" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT type, value, note FROM iocs ORDER BY id").fetchall()
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM timeline_events ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert rows == [
+        ("ip", "8.8.8.8", "resolver"),
+        ("domain", "xn--bcher-kva.example", "idna"),
+        ("url", "https://example.com/path?x=1", "landing"),
+        ("hash", "a" * 64, "payload"),
+    ]
+    assert event_types.count("ioc.added") == 4
+    assert "ioc.listed" in event_types
+
+
+def test_invalid_iocs_are_rejected(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-invalid-iocs"]) == 0
+    assert main(["add-ioc", "case-invalid-iocs", "--type", "ip", "--value", "999.1.1.1", "--note", "bad"]) == 1
+    assert main(["add-ioc", "case-invalid-iocs", "--type", "domain", "--value", "bad_domain", "--note", "bad"]) == 1
+    assert main(["add-ioc", "case-invalid-iocs", "--type", "url", "--value", "ftp://example.com", "--note", "bad"]) == 1
+    assert main(["add-ioc", "case-invalid-iocs", "--type", "hash", "--value", "not-a-hash", "--note", "bad"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Error:" in captured.err
+
+    db_path = tmp_path / "rekos_cases" / "case-invalid-iocs" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        ioc_count = connection.execute("SELECT COUNT(*) FROM iocs").fetchone()[0]
+    assert ioc_count == 0
+
+
+def test_enrich_ioc_is_local_and_persists_result(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-enrich"]) == 0
+    assert main(["enrich-ioc", "case-enrich", "--type", "ip", "--value", "127.0.0.1"]) == 0
+    assert main(["enrich-ioc", "case-enrich", "--type", "url", "--value", "https://example.com/a?b=1"]) == 0
+
+    output = capsys.readouterr().out
+    assert '"loopback": true' in output
+    assert '"has_query": true' in output
+
+    db_path = tmp_path / "rekos_cases" / "case-enrich" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT type, value, enrichment FROM ioc_enrichments ORDER BY id"
+        ).fetchall()
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM timeline_events ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert rows[0][0:2] == ("ip", "127.0.0.1")
+    assert '"version": 4' in rows[0][2]
+    assert rows[1][0:2] == ("url", "https://example.com/a?b=1")
+    assert '"host": "example.com"' in rows[1][2]
+    assert event_types.count("ioc.enriched") == 2
+
+
+def test_report_renders_ioc_section(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-ioc-report"]) == 0
+    assert main([
+        "add-ioc",
+        "case-ioc-report",
+        "--type",
+        "domain",
+        "--value",
+        "example.com",
+        "--note",
+        "reported domain",
+    ]) == 0
+    assert main(["enrich-ioc", "case-ioc-report", "--type", "hash", "--value", "b" * 32]) == 0
+    capsys.readouterr()
+
+    assert main(["report", "case-ioc-report"]) == 0
+
+    output = capsys.readouterr().out
+    assert "## IOCs" in output
+    assert "`domain`: example.com" in output
+    assert "reported domain" in output
+    assert "## IOC Enrichments" in output
+    assert '"algorithm": "MD5"' in output
 
 
 def test_validate_case_reports_healthy_case(tmp_path: Path, monkeypatch, capsys) -> None:

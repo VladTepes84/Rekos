@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rekos"
 version = "0.1.0"
-description = "Local defensive cyber case-management CLI"
+description = "Terminal-native passive OSINT CLI"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

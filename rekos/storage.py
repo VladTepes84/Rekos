@@ -1,9 +1,10 @@
-"""SQLite-backed case storage."""
+"""SQLite-backed local OSINT case storage."""
 
 from __future__ import annotations
 
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,8 @@ from .models import (
     CaseSnapshot,
     EvidenceRecord,
     FileHashRecord,
+    IocEnrichmentRecord,
+    IocRecord,
     MetadataRecord,
     NoteRecord,
     TargetRecord,
@@ -36,7 +39,7 @@ def utc_now_iso() -> str:
 
 
 class CaseStore:
-    """Persistence boundary for REKOS case state."""
+    """Persistence boundary for REKOS OSINT workspace state."""
 
     def __init__(self, cases_root: Path | None = None) -> None:
         self.cases_root = cases_root
@@ -203,6 +206,76 @@ class CaseStore:
             self._insert_timeline_event(connection, "note.added", "Added note")
         return NoteRecord(text=cleaned_text, added_at=added_at)
 
+    def add_ioc(self, case: str, ioc_type: str, value: str, note: str) -> IocRecord:
+        cleaned_note = note.strip()
+        created_at = utc_now_iso()
+        record = IocRecord(
+            ioc_type=ioc_type,
+            value=value,
+            note=cleaned_note,
+            created_at=created_at,
+        )
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO iocs (type, value, note, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (record.ioc_type, record.value, record.note, record.created_at),
+            )
+            self._insert_timeline_event(
+                connection,
+                "ioc.added",
+                f"Added {record.ioc_type} IOC {record.value}",
+            )
+        return record
+
+    def list_iocs(self, case: str) -> list[IocRecord]:
+        with self.connection_for_case(case) as connection:
+            rows = connection.execute(
+                "SELECT type, value, note, created_at FROM iocs ORDER BY id"
+            ).fetchall()
+            self._insert_timeline_event(connection, "ioc.listed", "Listed IOCs")
+        return [
+            IocRecord(
+                ioc_type=row["type"],
+                value=row["value"],
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def add_ioc_enrichment(
+        self,
+        case: str,
+        ioc_type: str,
+        value: str,
+        enrichment: dict[str, object],
+    ) -> IocEnrichmentRecord:
+        created_at = utc_now_iso()
+        enrichment_text = json.dumps(enrichment, sort_keys=True)
+        record = IocEnrichmentRecord(
+            ioc_type=ioc_type,
+            value=value,
+            enrichment=enrichment_text,
+            created_at=created_at,
+        )
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO ioc_enrichments (type, value, enrichment, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (record.ioc_type, record.value, record.enrichment, record.created_at),
+            )
+            self._insert_timeline_event(
+                connection,
+                "ioc.enriched",
+                f"Enriched {record.ioc_type} IOC {record.value}",
+            )
+        return record
+
     def record_report_rendered(self, case: str, report_format: str) -> None:
         with self.connection_for_case(case) as connection:
             self._insert_timeline_event(
@@ -344,6 +417,32 @@ class CaseStore:
                     """
                 ).fetchall()
             ]
+            iocs = [
+                IocRecord(
+                    ioc_type=row["type"],
+                    value=row["value"],
+                    note=row["note"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    "SELECT type, value, note, created_at FROM iocs ORDER BY id"
+                ).fetchall()
+            ]
+            ioc_enrichments = [
+                IocEnrichmentRecord(
+                    ioc_type=row["type"],
+                    value=row["value"],
+                    enrichment=row["enrichment"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT type, value, enrichment, created_at
+                    FROM ioc_enrichments
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
             validation_row = connection.execute(
                 """
                 SELECT status, warnings, checked_at
@@ -376,6 +475,8 @@ class CaseStore:
             username_scans=username_scans,
             notes=notes,
             timeline=timeline,
+            iocs=iocs,
+            ioc_enrichments=ioc_enrichments,
             validation=validation,
         )
 
@@ -484,6 +585,22 @@ class CaseStore:
                 status TEXT NOT NULL,
                 warnings TEXT NOT NULL,
                 checked_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS iocs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL,
+                value TEXT NOT NULL,
+                note TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ioc_enrichments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL,
+                value TEXT NOT NULL,
+                enrichment TEXT NOT NULL,
+                created_at TEXT NOT NULL
             );
             """
         )

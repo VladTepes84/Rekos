@@ -1,4 +1,4 @@
-"""Report rendering for case snapshots."""
+"""Report rendering for OSINT workspace snapshots."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def render_report(snapshot: CaseSnapshot, report_format: str) -> str:
 
 def render_markdown(snapshot: CaseSnapshot) -> str:
     lines: list[str] = [
-        f"# REKOS Case Report: {snapshot.case.name}",
+        f"# REKOS OSINT Workspace Report: {snapshot.case.name}",
         "",
         "## Case",
         f"- UUID: `{snapshot.case.uuid}`",
@@ -96,6 +96,32 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     if snapshot.notes:
         for note in snapshot.notes:
             lines.append(f"- {note.text} ({note.added_at})")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## IOCs"])
+    if snapshot.iocs:
+        for ioc in snapshot.iocs:
+            lines.extend(
+                [
+                    f"- `{ioc.ioc_type}`: {ioc.value}",
+                    f"  - Note: {ioc.note or 'None'}",
+                    f"  - Added: {ioc.created_at}",
+                ]
+            )
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## IOC Enrichments"])
+    if snapshot.ioc_enrichments:
+        for enrichment in snapshot.ioc_enrichments:
+            lines.extend(
+                [
+                    f"- `{enrichment.ioc_type}`: {enrichment.value}",
+                    f"  - Result: `{enrichment.enrichment}`",
+                    f"  - Added: {enrichment.created_at}",
+                ]
+            )
     else:
         lines.append("- None recorded")
 
