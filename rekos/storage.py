@@ -2005,6 +2005,7 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
 def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int, str]:
     value_key = finding.value.strip().lower()
     raw_key = finding.raw_reference.strip().lower()
+    duplicate_sources = context.value_sources.get(value_key, set())
     score = 20
     reasons = ["correlation quality only; does not claim identity ownership"]
 
@@ -2038,9 +2039,8 @@ def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int,
         score += 15
         reasons.append("trusted passive source type")
 
-    duplicate_sources = context.value_sources.get(value_key, set())
     if len(duplicate_sources) > 1:
-        confirmation_points = 25 if len(duplicate_sources) >= 3 else 20
+        confirmation_points = 60 if len(duplicate_sources) >= 3 else 55
         score += confirmation_points
         sources = ", ".join(sorted(duplicate_sources))
         reasons.append(
@@ -2104,6 +2104,9 @@ def _profile_username_score(
     normalized_usernames: set[str],
     weak_usernames: set[str],
 ) -> tuple[int, str]:
+    if finding.source == "wmn_username":
+        return 0, ""
+
     value_key = finding.value.strip().lower()
     adapter_targets = context.adapter_targets.get((finding.source, value_key), set())
     exact_candidates = adapter_targets or context.usernames

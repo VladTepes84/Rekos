@@ -23,6 +23,12 @@ pipx install .
 rekos --help
 ```
 
+Install the public v0.1 package with optional username-source tooling:
+
+```bash
+pipx install "git+https://github.com/VladTepes84/Rekos.git[full]"
+```
+
 For development, use an editable install:
 
 ```bash
@@ -38,7 +44,7 @@ rekos --help
 Optional external tools:
 
 - `sherlock` for `sherlock_username`
-- `maigret` is supported by the investigation engine when installed
+- `maigret` is optional for `maigret_username`; install it with `pipx inject rekos maigret` or install REKOS with `[full]`
 - `exiftool` or `mediainfo` for file metadata collection
 - Playwright is optional for URL screenshots; HTTP snapshots still work without it
 
@@ -104,6 +110,8 @@ rekos export-case acme-osint --output ./acme-osint.zip
 | Source | Target types | Dependencies | Notes |
 | --- | --- | --- | --- |
 | `sherlock_username` | `username` | `sherlock` binary | Runs Sherlock with safe subprocess arguments and parses public profile URLs. |
+| `maigret_username` | `username` | optional `maigret` package/tool | Runs Maigret when installed; REKOS continues without it. |
+| `wmn_username` | `username` | none | Checks local public profile URL templates with conservative passive HTTP validation. |
 | `http_snapshot` | `url` | none | Captures public HTTP response artifacts and optional Playwright screenshot. |
 | `rdap_domain` | `domain` | none | Uses public HTTPS RDAP lookup and stores raw JSON output. |
 | `crtsh_domain` | `domain` | none | Queries the public crt.sh certificate transparency endpoint. |

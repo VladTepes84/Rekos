@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import tomllib
 import uuid
 import zipfile
 from pathlib import Path
@@ -251,6 +252,15 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["wayback_url"].supported_target_types == ("url", "domain")
 
 
+def test_pyproject_exposes_username_optional_dependencies() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    optional = data["project"]["optional-dependencies"]
+
+    assert optional["username"] == ["maigret"]
+    assert optional["full"] == ["maigret"]
+    assert "maigret" not in data["project"]["dependencies"]
+
+
 def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
     monkeypatch.setattr("rekos.adapters.base.shutil.which", lambda _dependency: None)
 
@@ -261,6 +271,10 @@ def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
     assert "Dependencies: none" in output
     assert "sherlock_username:" in output
     assert "sherlock: missing" in output
+    assert "maigret_username:" in output
+    assert "maigret: missing" in output
+    assert "pipx inject rekos maigret" in output
+    assert "install REKOS with [full]" in output
 
 
 def test_sources_run_missing_dependency(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1976,6 +1990,116 @@ def test_discovered_profile_quality_scores_username_match_strength(
     assert weak_score < 45
     assert quality_label(weak_score) == "low"
     assert "weak username variant match" in weak_reason
+
+
+def test_wmn_only_template_hit_is_not_high_by_default(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-wmn-score"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-wmn-score",
+        [
+            AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url="https://github.com/alice",
+                platform="github",
+                confidence="medium",
+                raw_reference="HTTP status: 200",
+            )
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["score", "case-wmn-score"]) == 0
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-wmn-score" / "rekos.db") as connection:
+        score, reason = connection.execute(
+            "SELECT quality_score, quality_reason FROM normalized_findings"
+        ).fetchone()
+
+    assert score < 75
+    assert quality_label(score) in {"low", "medium"}
+    assert "exact username match" not in reason
+    assert "does not claim identity ownership" in reason
+
+
+def test_sherlock_and_wmn_same_url_boosts_quality(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-wmn-confirmation"]) == 0
+
+    store = CaseStore()
+    profile_url = "https://github.com/alice"
+    store.add_adapter_results(
+        "case-wmn-confirmation",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url=profile_url,
+                platform="github",
+                confidence="high",
+                raw_reference=profile_url,
+            ),
+            AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url=profile_url,
+                platform="github",
+                confidence="medium",
+                raw_reference="HTTP status: 200",
+            ),
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["score", "case-wmn-confirmation"]) == 0
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-wmn-confirmation" / "rekos.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT source, quality_score, quality_reason
+            FROM normalized_findings
+            ORDER BY source
+            """
+        ).fetchall()
+
+    assert {row[0] for row in rows} == {"sherlock_username", "wmn_username"}
+    assert all(row[1] >= 90 for row in rows)
+    assert all("same URL confirmed by 2 source(s)" in row[2] for row in rows)
+    assert all("does not claim identity ownership" in row[2] for row in rows)
+
+
+def test_ambiguous_wmn_response_stays_low_or_medium(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(302, b"")
+
+    monkeypatch.setattr("rekos.adapters.wmn.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-wmn-ambiguous"]) == 0
+    assert main(["sources", "run", "case-wmn-ambiguous", "wmn_username", "alice"]) == 0
+    capsys.readouterr()
+    assert main(["score", "case-wmn-ambiguous"]) == 0
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-wmn-ambiguous" / "rekos.db") as connection:
+        scores = [
+            row[0]
+            for row in connection.execute(
+                "SELECT quality_score FROM normalized_findings"
+            ).fetchall()
+        ]
+
+    assert scores
+    assert all(quality_label(score) in {"low", "medium"} for score in scores)
 
 
 def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(
