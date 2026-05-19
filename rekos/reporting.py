@@ -1,11 +1,10 @@
-"""Report rendering for OSINT workspace snapshots."""
+"""Report rendering for case snapshots."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from .errors import UnsupportedReportFormatError
 from .models import CaseSnapshot
+from .storage import quality_label
 
 
 def render_report(snapshot: CaseSnapshot, report_format: str) -> str:
@@ -17,10 +16,9 @@ def render_report(snapshot: CaseSnapshot, report_format: str) -> str:
 
 def render_markdown(snapshot: CaseSnapshot) -> str:
     lines: list[str] = [
-        f"# REKOS OSINT Workspace Report: {snapshot.case.name}",
+        f"# REKOS Case Report: {snapshot.case.name}",
         "",
         "## Case",
-        f"- UUID: `{snapshot.case.uuid}`",
         f"- Created: {snapshot.case.created_at}",
         "",
         "## Targets",
@@ -37,7 +35,7 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
         for file_hash in snapshot.file_hashes:
             lines.extend(
                 [
-                    f"- Path: `{_display_path(file_hash.path, snapshot.case.folder)}`",
+                    f"- Path: `{file_hash.path}`",
                     f"  - SHA-256: `{file_hash.sha256}`",
                     f"  - Size: {file_hash.size_bytes} bytes",
                     f"  - Added: {file_hash.added_at}",
@@ -46,33 +44,14 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("- None recorded")
 
-    lines.extend(["", "## Evidence"])
-    if snapshot.evidence:
-        for evidence in snapshot.evidence:
-            lines.extend(
-                [
-                    f"- ID: `{evidence.evidence_id}`",
-                    f"  - Type: {evidence.evidence_type}",
-                    f"  - Path: `{_display_path(evidence.path, snapshot.case.folder)}`",
-                    f"  - SHA-256: `{evidence.sha256}`",
-                    f"  - Created: {evidence.created_at}",
-                ]
-            )
-            if evidence.source_url:
-                lines.append(f"  - Source URL: {evidence.source_url}")
-            if evidence.note:
-                lines.append(f"  - Note: {evidence.note}")
-    else:
-        lines.append("- None recorded")
-
     lines.extend(["", "## Metadata Findings"])
     if snapshot.metadata:
         for metadata in snapshot.metadata:
             lines.extend(
                 [
-                    f"- File: `{_display_path(metadata.path, snapshot.case.folder)}`",
+                    f"- File: `{metadata.path}`",
                     f"  - Tools: {metadata.tools}",
-                    f"  - Export: `{_display_path(metadata.export_path, snapshot.case.folder)}`",
+                    f"  - Export: `{metadata.export_path}`",
                     f"  - Added: {metadata.added_at}",
                 ]
             )
@@ -85,7 +64,7 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
             lines.extend(
                 [
                     f"- Username: `{scan.username}`",
-                    f"  - Export: `{_display_path(scan.export_path, snapshot.case.folder)}`",
+                    f"  - Export: `{scan.export_path}`",
                     f"  - Added: {scan.added_at}",
                 ]
             )
@@ -99,67 +78,123 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("- None recorded")
 
-    lines.extend(["", "## IOCs"])
-    if snapshot.iocs:
-        for ioc in snapshot.iocs:
+    lines.extend(["", "## Entities"])
+    if snapshot.entities:
+        for entity in snapshot.entities:
             lines.extend(
                 [
-                    f"- `{ioc.ioc_type}`: {ioc.value}",
-                    f"  - Note: {ioc.note or 'None'}",
-                    f"  - Added: {ioc.created_at}",
+                    f"- `{entity.entity_type}`: {entity.value}",
+                    f"  - UUID: `{entity.entity_id}`",
+                    f"  - Added: {entity.created_at}",
+                ]
+            )
+            if entity.note:
+                lines.append(f"  - Note: {entity.note}")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Relationships"])
+    if snapshot.relationships:
+        for relationship in snapshot.relationships:
+            lines.extend(
+                [
+                    f"- `{relationship.relationship_type}` ({relationship.confidence})",
+                    f"  - UUID: `{relationship.relationship_id}`",
+                    f"  - From: `{relationship.source_entity_id}`",
+                    f"  - To: `{relationship.target_entity_id}`",
+                    f"  - Added: {relationship.created_at}",
+                ]
+            )
+            if relationship.note:
+                lines.append(f"  - Note: {relationship.note}")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Graph Summary"])
+    lines.extend(
+        [
+            f"- Total entities: {snapshot.graph_summary.total_entities}",
+            f"- Total relationships: {snapshot.graph_summary.total_relationships}",
+            "- Entity type counts:",
+        ]
+    )
+    if snapshot.graph_summary.entity_type_counts:
+        for entity_type, count in snapshot.graph_summary.entity_type_counts.items():
+            lines.append(f"  - {entity_type}: {count}")
+    else:
+        lines.append("  - None recorded")
+    lines.append("- Most connected entities:")
+    if snapshot.graph_summary.most_connected:
+        for entity in snapshot.graph_summary.most_connected:
+            lines.append(
+                f"  - `{entity.entity_id}` {entity.entity_type}: "
+                f"{entity.value} ({entity.connection_count})"
+            )
+    else:
+        lines.append("  - None recorded")
+
+    lines.extend(["", "## Findings"])
+    if snapshot.findings:
+        for finding in snapshot.findings:
+            lines.extend(
+                [
+                    f"- `{finding.finding_type}`: {finding.value}",
+                    f"  - Confidence: {finding.confidence}",
+                    f"  - Quality: {finding.quality_score} ({quality_label(finding.quality_score)})",
+                    f"  - Quality reason: {finding.quality_reason or 'Not scored yet'}",
+                    f"  - Source: {finding.source}",
+                    f"  - UUID: `{finding.finding_id}`",
+                    f"  - Added: {finding.created_at}",
                 ]
             )
     else:
         lines.append("- None recorded")
 
-    lines.extend(["", "## IOC Enrichments"])
-    if snapshot.ioc_enrichments:
-        for enrichment in snapshot.ioc_enrichments:
+    lines.extend(["", "## Investigations"])
+    if snapshot.investigations:
+        for investigation in snapshot.investigations:
             lines.extend(
                 [
-                    f"- `{enrichment.ioc_type}`: {enrichment.value}",
-                    f"  - Result: `{enrichment.enrichment}`",
-                    f"  - Added: {enrichment.created_at}",
+                    f"- Username: {investigation.username}",
+                    f"  - Variants: {investigation.variant_count}",
+                    f"  - Discovered profiles: {investigation.profile_count}",
+                    f"  - Added: {investigation.created_at}",
                 ]
             )
+            if investigation.profiles:
+                lines.append("  - Profiles:")
+                for profile in investigation.profiles:
+                    lines.append(
+                        f"    - {profile.profile_url} "
+                        f"({profile.confidence}, from {profile.source_username})"
+                    )
+            else:
+                lines.append("  - Profiles: None recorded")
     else:
         lines.append("- None recorded")
 
-    lines.extend(["", "## Timeline"])
-    if snapshot.timeline:
-        for event in snapshot.timeline:
-            lines.append(f"- {event.created_at} `{event.event_type}` {event.summary}")
+    lines.extend(["", "## Snapshots"])
+    if snapshot.snapshots:
+        for snapshot_record in snapshot.snapshots:
+            status = (
+                str(snapshot_record.status_code)
+                if snapshot_record.status_code is not None
+                else "unknown"
+            )
+            lines.extend(
+                [
+                    f"- URL: {snapshot_record.url}",
+                    f"  - Captured: {snapshot_record.captured_at}",
+                    f"  - HTTP status: {status}",
+                    f"  - Headers: `{snapshot_record.headers_path}`",
+                    f"  - Body: `{snapshot_record.body_path}`",
+                    f"  - Evidence: `{snapshot_record.evidence_id}`",
+                ]
+            )
+            if snapshot_record.screenshot_path:
+                lines.append(f"  - Screenshot: `{snapshot_record.screenshot_path}`")
     else:
         lines.append("- None recorded")
-
-    lines.extend(["", "## Validation"])
-    if snapshot.validation:
-        lines.extend(
-            [
-                f"- Status: {snapshot.validation.status}",
-                f"- Checked: {snapshot.validation.checked_at}",
-            ]
-        )
-        if snapshot.validation.warnings:
-            lines.append("- Warnings:")
-            for warning in snapshot.validation.warnings:
-                lines.append(f"  - {warning}")
-        else:
-            lines.append("- Warnings: None")
-    else:
-        lines.append("- No validation recorded")
 
     lines.append("")
     return "\n".join(lines)
-
-
-def _display_path(path_text: str, case_folder: str) -> str:
-    path = Path(path_text)
-    if not path.is_absolute():
-        return path.as_posix()
-
-    case_path = Path(case_folder)
-    try:
-        return path.relative_to(case_path).as_posix()
-    except ValueError:
-        return path.name

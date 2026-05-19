@@ -9,9 +9,7 @@ from typing import Optional
 @dataclass(frozen=True)
 class CaseRecord:
     name: str
-    uuid: str
     created_at: str
-    folder: str
 
 
 @dataclass(frozen=True)
@@ -36,8 +34,8 @@ class EvidenceRecord:
     path: str
     sha256: str
     created_at: str
-    source_url: Optional[str]
-    note: Optional[str]
+    source_url: str
+    note: str
 
 
 @dataclass(frozen=True)
@@ -64,34 +62,138 @@ class NoteRecord:
 
 
 @dataclass(frozen=True)
-class TimelineEventRecord:
-    event_id: str
-    event_type: str
-    summary: str
-    created_at: str
-
-
-@dataclass(frozen=True)
-class IocRecord:
-    ioc_type: str
+class EntityRecord:
+    entity_id: str
+    entity_type: str
     value: str
     note: str
     created_at: str
 
 
 @dataclass(frozen=True)
-class IocEnrichmentRecord:
-    ioc_type: str
-    value: str
-    enrichment: str
+class RelationshipRecord:
+    relationship_id: str
+    source_entity_id: str
+    target_entity_id: str
+    relationship_type: str
+    confidence: str
+    note: str
     created_at: str
 
 
 @dataclass(frozen=True)
-class ValidationSummaryRecord:
+class ConnectedEntityRecord:
+    entity_id: str
+    entity_type: str
+    value: str
+    connection_count: int
+
+
+@dataclass(frozen=True)
+class GraphSummaryRecord:
+    total_entities: int
+    total_relationships: int
+    entity_type_counts: dict[str, int]
+    most_connected: list[ConnectedEntityRecord]
+
+
+@dataclass(frozen=True)
+class TimelineEventRecord:
+    event_type: str
+    summary: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class InvestigationProfileRecord:
+    source_username: str
+    profile_url: str
+    confidence: str
+    export_path: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AdapterResultRecord:
+    source: str
+    target: str
+    url: str
+    platform: str
+    confidence: str
+    raw_reference: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class FindingRecord:
+    finding_id: str
+    finding_type: str
+    value: str
+    source: str
+    confidence: str
+    quality_score: int
+    quality_reason: str
+    created_at: str
+    raw_reference: str
+
+
+@dataclass(frozen=True)
+class SearchResultRecord:
+    result_type: str
+    subtype: str
+    value: str
+    source: str
+    confidence: str
+    context: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class SourceRunRecord:
+    source: str
+    target: str
     status: str
-    warnings: list[str]
-    checked_at: str
+    findings_count: int
+    error: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class InvestigationSummaryRecord:
+    username: str
+    variant_count: int
+    profile_count: int
+    created_at: str
+    profiles: list[InvestigationProfileRecord]
+
+
+@dataclass(frozen=True)
+class SourceInvestigationErrorRecord:
+    source: str
+    error: str
+
+
+@dataclass(frozen=True)
+class SourceInvestigationRecord:
+    target_type: str
+    target: str
+    source_count: int
+    result_count: int
+    skipped_count: int
+    failed_count: int
+    created_at: str
+    errors: list[SourceInvestigationErrorRecord]
+
+
+@dataclass(frozen=True)
+class SnapshotRecord:
+    url: str
+    captured_at: str
+    status_code: Optional[int]
+    headers_path: str
+    body_path: str
+    screenshot_path: str
+    evidence_id: str
 
 
 @dataclass(frozen=True)
@@ -103,7 +205,12 @@ class CaseSnapshot:
     metadata: list[MetadataRecord]
     username_scans: list[UsernameScanRecord]
     notes: list[NoteRecord]
+    entities: list[EntityRecord]
+    relationships: list[RelationshipRecord]
+    graph_summary: GraphSummaryRecord
     timeline: list[TimelineEventRecord]
-    iocs: list[IocRecord]
-    ioc_enrichments: list[IocEnrichmentRecord]
-    validation: Optional[ValidationSummaryRecord]
+    investigations: list[InvestigationSummaryRecord]
+    source_investigations: list[SourceInvestigationRecord]
+    adapter_results: list[AdapterResultRecord]
+    findings: list[FindingRecord]
+    snapshots: list[SnapshotRecord]
