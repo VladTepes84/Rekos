@@ -153,6 +153,8 @@ def test_passive_osint_commands_are_registered() -> None:
     subcommands = subparser_action.choices
 
     assert "metadata" in subcommands
+    assert "quickstart" in subcommands
+    assert "version" in subcommands
     assert "username-scan" in subcommands
     assert "add-entity" in subcommands
     assert "relate-entities" in subcommands
@@ -171,6 +173,24 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "list-sources" in subcommands
     assert "export-case" in subcommands
     assert "sources" in subcommands
+
+
+def test_quickstart_command_outputs_onboarding(capsys) -> None:
+    assert main(["quickstart"]) == 0
+
+    output = capsys.readouterr().out
+    assert "REKOS quickstart" in output
+    assert 'pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"' in output
+    assert "rekos investigate username social_test username" in output
+    assert "Run only rekos commands" in output
+    assert "Sherlock and Maigret are optional integrations" in output
+
+
+def test_version_command_outputs_package_version(capsys) -> None:
+    assert main(["version"]) == 0
+
+    output = capsys.readouterr().out.strip()
+    assert output == "rekos 0.1.0"
 
 
 def test_username_variant_generation_and_deduplication() -> None:

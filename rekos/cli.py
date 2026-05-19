@@ -10,6 +10,7 @@ from typing import Sequence
 from rich.console import Console
 from rich.table import Table
 
+from . import __version__
 from .adapters.registry import default_registry
 from .errors import RekosError
 from .exporting import export_case
@@ -31,12 +32,45 @@ console = Console(width=240)
 error_console = Console(stderr=True, width=240)
 
 
+QUICKSTART_TEXT = """REKOS quickstart
+
+Install:
+  pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"
+
+Basic workflow:
+  rekos new-case social_test
+  rekos investigate username social_test username
+  rekos findings social_test
+  rekos score social_test
+  rekos graph-summary social_test
+  rekos export-case social_test --output social_test.zip
+
+Common commands:
+  rekos sources list
+  rekos sources check
+  rekos show-investigation <case>
+  rekos search <case> <query>
+  rekos report <case>
+
+Investigations:
+  A case is a local SQLite-backed workspace under ~/rekos_cases/<case>.
+  Run only rekos commands. Sherlock and Maigret are optional integrations
+  orchestrated internally when available.
+  rekos investigate username <case> <username> generates variants, runs
+  available passive username sources, normalizes findings, updates the graph,
+  scores correlation quality, and stores raw source output under exports/.
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rekos",
         description="Terminal-native passive OSINT CLI",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("quickstart", help="Show installation and basic workflow")
+    subparsers.add_parser("version", help="Show REKOS version")
 
     new_case = subparsers.add_parser("new-case", help="Create a new local case")
     new_case.add_argument("name")
@@ -171,6 +205,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = CaseStore()
 
     try:
+        if args.command == "quickstart":
+            console.print(QUICKSTART_TEXT, markup=False)
+            return 0
+
+        if args.command == "version":
+            console.print(f"rekos {__version__}")
+            return 0
+
         if args.command == "new-case":
             folder = store.create_case(args.name)
             console.print(f"[green]Created case[/green] {args.name} at {folder}")

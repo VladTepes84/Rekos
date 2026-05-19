@@ -10,14 +10,14 @@ REKOS is designed for passive public-source workflows:
 - Local-first OSINT case workspace
 - No login automation, bypass, credential collection, or active exploitation
 
-Cases are stored under `~/rekos_cases/<case_name>` by default. Each case keeps its own SQLite database and export artifacts.
+A case is a local workspace for one public-source research thread. Cases are stored under `~/rekos_cases/<case_name>` by default. Each case keeps its own SQLite database, source outputs, evidence artifacts, graph records, findings, and exports.
 
 ## Installation
 
 Recommended full install:
 
 ```bash
-pipx install "git+https://github.com/VladTepes84/Rekos.git[full]"
+pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"
 ```
 
 The full install includes optional Maigret support for `maigret_username`. Users still run REKOS commands such as `rekos investigate username <case> <username>`; REKOS calls available username sources through its source adapters.
@@ -62,60 +62,51 @@ Users always run `rekos`, not Sherlock or Maigret directly. `rekos investigate u
 
 ## Quick Start
 
-Create a case:
+```bash
+rekos new-case social_test
+rekos investigate username social_test username
+rekos findings social_test
+rekos score social_test
+rekos graph-summary social_test
+rekos export-case social_test --output social_test.zip
+```
+
+Normal workflow:
+
+1. Create a case with `rekos new-case`.
+2. Add or investigate a target with `rekos investigate username`, `rekos investigate domain`, or `rekos snapshot-url`.
+3. Review normalized results with `rekos findings`.
+4. Score correlation quality with `rekos score`.
+5. Inspect relationships with `rekos graph-summary` or `rekos list-entities`.
+6. Export the workspace with `rekos export-case`.
+
+Most users only need these commands:
 
 ```bash
+rekos quickstart
 rekos new-case acme-osint
-```
-
-Investigate a username:
-
-```bash
 rekos investigate username acme-osint alice.example
-```
-
-Investigate a domain:
-
-```bash
 rekos investigate domain acme-osint example.com
-```
-
-Capture a public URL snapshot:
-
-```bash
 rekos snapshot-url acme-osint https://example.com/profile/alice
-```
-
-Review normalized findings:
-
-```bash
 rekos findings acme-osint
-```
-
-Score finding correlation quality:
-
-```bash
 rekos score acme-osint
-```
-
-Search local case data:
-
-```bash
 rekos search acme-osint example.com
-rekos search acme-osint example.com --type finding --source wayback_url --confidence medium
-```
-
-Summarize the entity graph:
-
-```bash
 rekos graph-summary acme-osint
-```
-
-Export the case:
-
-```bash
 rekos export-case acme-osint --output ./acme-osint.zip
 ```
+
+Users run only `rekos`. Sherlock and Maigret are optional integrations that REKOS orchestrates internally when available.
+
+During `rekos investigate username <case> <username>`, REKOS generates safe username variants, runs available passive username sources, stores raw source output, normalizes discovered profile URLs into findings, updates the entity graph, records timeline events, and computes correlation-quality scores. Results are correlation indicators, not proof of identity ownership.
+
+## How REKOS Works
+
+- Target input: user-provided usernames, domains, URLs, files, notes, and indicators are stored in a local case.
+- Source orchestration: REKOS runs passive adapters such as username sources, RDAP, crt.sh, Wayback, metadata tools, and HTTP snapshots when available.
+- Findings normalization: raw source output is converted into normalized findings such as discovered profiles, URLs, domains, metadata records, archive records, and registration records.
+- Graph correlation: entities and relationships connect usernames, profiles, domains, URLs, files, and notes.
+- Quality scoring: REKOS scores correlation quality from source confidence, exact or normalized matches, duplicate source confirmation, evidence presence, and graph relationships.
+- Evidence export: raw outputs, artifacts, reports, SQLite data, and manifests can be exported with `rekos export-case`.
 
 ## Supported Sources
 
