@@ -1,0 +1,34 @@
+[
+  {
+    "platform": "GitHub",
+    "url_template": "https://github.com/{username}"
+  },
+  {
+    "platform": "Reddit",
+    "url_template": "https://www.reddit.com/user/{username}"
+  },
+  {
+    "platform": "TikTok",
+    "url_template": "https://www.tiktok.com/@{username}"
+  },
+  {
+    "platform": "YouTube",
+    "url_template": "https://www.youtube.com/@{username}"
+  },
+  {
+    "platform": "Pinterest",
+    "url_template": "https://www.pinterest.com/{username}"
+  },
+  {
+    "platform": "Twitch",
+    "url_template": "https://www.twitch.tv/{username}"
+  },
+  {
+    "platform": "Steam",
+    "url_template": "https://steamcommunity.com/id/{username}"
+  },
+  {
+    "platform": "Medium",
+    "url_template": "https://medium.com/@{username}"
+  }
+]

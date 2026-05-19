@@ -8,8 +8,10 @@ from rekos.errors import RekosError
 
 from .base import BaseSourceAdapter
 from .http_snapshot import HttpSnapshotAdapter
+from .maigret import MaigretAdapter
 from .sherlock import SherlockUsernameAdapter
 from .web_osint import CrtshDomainAdapter, RdapDomainAdapter, WaybackUrlAdapter
+from .wmn import WmnUsernameAdapter
 
 
 class SourceNotFoundError(RekosError):
@@ -53,8 +55,10 @@ def default_registry() -> SourceAdapterRegistry:
         [
             CrtshDomainAdapter(),
             HttpSnapshotAdapter(),
+            MaigretAdapter(),
             RdapDomainAdapter(),
             SherlockUsernameAdapter(),
             WaybackUrlAdapter(),
+            WmnUsernameAdapter(),
         ]
     )

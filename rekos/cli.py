@@ -420,6 +420,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"({finding.confidence}) from {finding.source}; "
                     f"quality {finding.quality_score}/{quality_label(finding.quality_score)}"
                 )
+                console.print(
+                    f"  Confirming sources ({finding.confirming_sources_count}): "
+                    f"{finding.confirming_sources}"
+                )
                 if finding.quality_reason:
                     console.print(f"  Reason: {finding.quality_reason}")
             return 0

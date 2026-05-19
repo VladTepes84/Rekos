@@ -16,7 +16,7 @@ URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 
 
 class MaigretAdapter(BaseSourceAdapter):
-    name = "maigret"
+    name = "maigret_username"
     description = "Run Maigret against a username and parse public profile URLs."
     supported_target_types = ("username",)
     passive_only = True

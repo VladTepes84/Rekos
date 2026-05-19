@@ -1436,6 +1436,8 @@ class CaseStore:
                 value=row["value"],
                 source=row["source"],
                 confidence=row["confidence"],
+                confirming_sources_count=row["confirming_sources_count"],
+                confirming_sources=row["confirming_sources"],
                 quality_score=row["quality_score"],
                 quality_reason=row["quality_reason"],
                 created_at=row["created_at"],
@@ -1444,6 +1446,22 @@ class CaseStore:
             for row in connection.execute(
                 """
                 SELECT finding_id, type, value, source, confidence,
+                       (
+                           SELECT COUNT(DISTINCT peer.source)
+                           FROM normalized_findings peer
+                           WHERE peer.type = normalized_findings.type
+                             AND lower(peer.value) = lower(normalized_findings.value)
+                       ) AS confirming_sources_count,
+                       (
+                           SELECT GROUP_CONCAT(source, ', ')
+                           FROM (
+                               SELECT DISTINCT peer.source AS source
+                               FROM normalized_findings peer
+                               WHERE peer.type = normalized_findings.type
+                                 AND lower(peer.value) = lower(normalized_findings.value)
+                               ORDER BY peer.source
+                           )
+                       ) AS confirming_sources,
                        quality_score, quality_reason,
                        created_at, raw_reference
                 FROM normalized_findings
@@ -2022,8 +2040,12 @@ def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int,
 
     duplicate_sources = context.value_sources.get(value_key, set())
     if len(duplicate_sources) > 1:
-        score += 15
-        reasons.append("duplicate confirmation across sources")
+        confirmation_points = 25 if len(duplicate_sources) >= 3 else 20
+        score += confirmation_points
+        sources = ", ".join(sorted(duplicate_sources))
+        reasons.append(
+            f"duplicate confirmation across sources; same URL confirmed by {len(duplicate_sources)} source(s): {sources}"
+        )
 
     source_run_count = context.source_runs.get(finding.source, 0)
     source_error_count = context.source_errors.get(finding.source, 0)
@@ -2136,7 +2158,7 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
     for result in results:
         source = result.source
         confidence = _normalize_confidence(result.confidence)
-        if source in {"sherlock", "sherlock_username", "maigret"}:
+        if source in {"sherlock", "sherlock_username", "maigret", "maigret_username", "wmn_username"}:
             findings.append(
                 _FindingInput(
                     finding_type="discovered_profile",

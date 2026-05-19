@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
-from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter
+from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter, WmnUsernameAdapter
 from .adapters.registry import default_registry
 from .adapters.web_osint import normalize_domain
 from .errors import ExternalToolExecutionError, ExternalToolMissingError, RekosError
@@ -59,7 +60,7 @@ def investigate_username(
 ) -> UsernameInvestigationResult:
     variants = username_variants(username)
     exports_folder = store.exports_folder(case)
-    adapters: list[BaseSourceAdapter] = [SherlockUsernameAdapter(), MaigretAdapter()]
+    adapters: list[BaseSourceAdapter] = [SherlockUsernameAdapter(), MaigretAdapter(), WmnUsernameAdapter()]
 
     profiles: list[ProfileFinding] = []
     seen_profiles: set[tuple[str, str]] = set()
@@ -68,6 +69,7 @@ def investigate_username(
     skipped_count = 0
     failed_count = 0
     failures: list[SourceInvestigationFailure] = []
+    skipped_missing_sources: set[str] = set()
     for variant in variants:
         for adapter in adapters:
             run_target = variant.value
@@ -86,9 +88,20 @@ def investigate_username(
             attempted_runs.add((adapter.name, run_target))
             try:
                 raw_output = adapter.run(case, run_target)
-            except ExternalToolMissingError:
+            except ExternalToolMissingError as exc:
                 if adapter.name == "sherlock_username":
                     raise
+                if adapter.name in skipped_missing_sources:
+                    continue
+                skipped_missing_sources.add(adapter.name)
+                skipped_count += 1
+                message = f"Missing dependencies for {adapter.name}: {exc}"
+                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                store.add_timeline_event(
+                    case,
+                    "source.skipped",
+                    f"Skipped source {adapter.name}: {exc}",
+                )
                 continue
             except ExternalToolExecutionError:
                 failed_count += 1
@@ -105,29 +118,33 @@ def investigate_username(
                 _export_stem(adapter, run_target),
                 raw_output,
             )
+            source_export_path = adapter._write_source_output(case, run_target, store, raw_output)
             adapter_results = [
                 _with_confidence(result, profile_confidence(variant))
                 for result in adapter.parse_results(run_target, raw_output)
             ]
-            new_adapter_results: list[AdapterResult] = []
+            normalized_results = [
+                _with_url(result, _normalize_profile_url(result.url))
+                for result in adapter_results
+            ]
+            store.add_adapter_results(case, normalized_results)
             for result in adapter_results:
-                key = (variant.value, result.url)
+                normalized_url = _normalize_profile_url(result.url)
+                key = (variant.value, normalized_url)
                 if key in seen_profiles:
                     continue
                 seen_profiles.add(key)
-                new_adapter_results.append(result)
                 profiles.append(
                     ProfileFinding(
                         source_username=variant.value,
-                        profile_url=result.url,
+                        profile_url=normalized_url,
                         confidence=result.confidence,
-                        export_path=export_path,
+                        export_path=source_export_path,
                         source=result.source,
                         platform=result.platform,
                         raw_reference=result.raw_reference,
                     )
                 )
-            store.add_adapter_results(case, new_adapter_results)
             sources_run += 1
 
     store.add_username_investigation(
@@ -208,6 +225,17 @@ def _with_confidence(result: AdapterResult, confidence: str) -> AdapterResult:
     )
 
 
+def _with_url(result: AdapterResult, url: str) -> AdapterResult:
+    return AdapterResult(
+        source=result.source,
+        target=result.target,
+        url=url,
+        platform=result.platform,
+        confidence=result.confidence,
+        raw_reference=result.raw_reference,
+    )
+
+
 def _export_stem(adapter: BaseSourceAdapter, username: str) -> str:
     safe_username = _safe_name(username)
     if adapter.name in {"sherlock", "sherlock_username"}:
@@ -232,6 +260,23 @@ def _clean_sherlock_failure_message(source: str, target: str) -> str:
     if source in {"sherlock", "sherlock_username"}:
         return f"{source} failed for {target}: invalid generated site URL / upstream tool error"
     return f"{source} failed for {target}: upstream tool error"
+
+
+def _normalize_profile_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return url.strip()
+    path = parsed.path.rstrip("/") or ""
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            "",
+            parsed.query,
+            "",
+        )
+    )
 
 
 def _investigate_sources(

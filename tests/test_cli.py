@@ -16,6 +16,7 @@ from rekos.adapters import (
     MaigretAdapter,
     SherlockAdapter,
     SourceRunResult,
+    WmnUsernameAdapter,
 )
 from rekos.adapters.registry import default_registry
 from rekos.cli import build_parser, main
@@ -26,6 +27,10 @@ from rekos.usernames import username_variants
 
 def _raise_missing_maigret(self, case: str, target: str) -> str:
     raise ExternalToolMissingError("Missing username investigation tool: install maigret.")
+
+
+def _empty_wmn(self, case: str, target: str) -> str:
+    return json.dumps({"source": "wmn_username", "target": target, "results": []})
 
 
 class FakeSourceAdapter:
@@ -212,10 +217,10 @@ def test_source_adapter_interface_contract() -> None:
     assert adapter.passive_only is True
     assert adapter.external_dependencies == ("sherlock",)
     assert isinstance(maigret, BaseSourceAdapter)
-    assert maigret.name == "maigret"
     assert maigret.description
     assert "username" in maigret.supported_target_types
     assert maigret.passive_only is True
+    assert maigret.name == "maigret_username"
     assert maigret.external_dependencies == ("maigret",)
 
 
@@ -227,12 +232,18 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sorted(sources) == [
         "crtsh_domain",
         "http_snapshot",
+        "maigret_username",
         "rdap_domain",
         "sherlock_username",
         "wayback_url",
+        "wmn_username",
     ]
     assert sources["sherlock_username"].supported_target_types == ("username",)
     assert sources["sherlock_username"].external_dependencies == ("sherlock",)
+    assert sources["maigret_username"].supported_target_types == ("username",)
+    assert sources["maigret_username"].external_dependencies == ("maigret",)
+    assert sources["wmn_username"].supported_target_types == ("username",)
+    assert sources["wmn_username"].external_dependencies == ()
     assert sources["http_snapshot"].supported_target_types == ("url",)
     assert sources["http_snapshot"].external_dependencies == ()
     assert sources["rdap_domain"].supported_target_types == ("domain",)
@@ -297,7 +308,7 @@ def test_maigret_adapter_parses_output() -> None:
         """,
     )
 
-    assert [result.source for result in results] == ["maigret", "maigret"]
+    assert [result.source for result in results] == ["maigret_username", "maigret_username"]
     assert [result.target for result in results] == ["alice", "alice"]
     assert [result.url for result in results] == [
         "https://reddit.com/user/alice",
@@ -312,6 +323,83 @@ def test_maigret_adapter_missing_tool(monkeypatch) -> None:
 
     with pytest.raises(ExternalToolMissingError, match="maigret"):
         MaigretAdapter().run("case", "alice")
+
+
+def test_wmn_adapter_parses_mocked_hit() -> None:
+    adapter = WmnUsernameAdapter()
+    raw_output = json.dumps(
+        {
+            "source": "wmn_username",
+            "target": "alice",
+            "results": [
+                {
+                    "platform": "GitHub",
+                    "url": "https://github.com/alice",
+                    "status_code": 200,
+                    "hit": True,
+                    "error": "",
+                },
+                {
+                    "platform": "Reddit",
+                    "url": "https://www.reddit.com/user/alice",
+                    "status_code": 404,
+                    "hit": False,
+                    "error": "",
+                },
+            ],
+        }
+    )
+
+    results = adapter.parse_results("alice", raw_output)
+
+    assert results == [
+        AdapterResult(
+            source="wmn_username",
+            target="alice",
+            url="https://github.com/alice",
+            platform="github",
+            confidence="medium",
+            raw_reference="HTTP status: 200",
+        )
+    ]
+
+
+def test_sources_run_wmn_username_creates_profile_finding(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        status = 200 if request.full_url == "https://github.com/alice" else 404
+        return FakeHttpResponse(status, b"")
+
+    monkeypatch.setattr("rekos.adapters.wmn.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-wmn-source"]) == 0
+    assert main(["sources", "run", "case-wmn-source", "wmn_username", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Ran source" in output
+    assert "wmn_username" in output
+    assert "Results: 1" in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-wmn-source"
+    assert list((case_folder / "exports" / "sources").glob("*wmn_username-alice.txt"))
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        row = connection.execute(
+            """
+            SELECT type, value, source, confidence, quality_score
+            FROM normalized_findings
+            """
+        ).fetchone()
+
+    assert row[0:4] == (
+        "discovered_profile",
+        "https://github.com/alice",
+        "wmn_username",
+        "medium",
+    )
+    assert row[4] > 0
 
 
 def test_entity_creation_persists_uuid(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -770,6 +858,7 @@ def test_investigate_username_with_mocked_sherlock(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
     calls: list[list[str]] = []
 
@@ -884,6 +973,7 @@ def test_investigate_username_runs_maigret_and_deduplicates(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr("rekos.adapters.maigret.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
     calls: list[list[str]] = []
 
@@ -925,7 +1015,7 @@ def test_investigate_username_runs_maigret_and_deduplicates(
 
     case_folder = tmp_path / "rekos_cases" / "case-maigret-investigate"
     assert (case_folder / "exports" / "investigate-username-alice.txt").exists()
-    assert (case_folder / "exports" / "investigate-maigret-alice.txt").exists()
+    assert (case_folder / "exports" / "investigate-maigret_username-alice.txt").exists()
 
     with sqlite3.connect(case_folder / "rekos.db") as connection:
         profile_rows = connection.execute(
@@ -958,13 +1048,135 @@ def test_investigate_username_runs_maigret_and_deduplicates(
     assert adapter_rows == [
         ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "high"),
         ("sherlock_username", "alice", "https://shared.example/alice", "shared", "high"),
-        ("maigret", "alice", "https://maigret.example/alice", "maigret", "high"),
+        ("maigret_username", "alice", "https://shared.example/alice", "shared", "high"),
+        ("maigret_username", "alice", "https://maigret.example/alice", "maigret", "high"),
     ]
     assert finding_rows == [
         ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "high"),
         ("discovered_profile", "https://shared.example/alice", "sherlock_username", "high"),
-        ("discovered_profile", "https://maigret.example/alice", "maigret", "high"),
+        ("discovered_profile", "https://shared.example/alice", "maigret_username", "high"),
+        ("discovered_profile", "https://maigret.example/alice", "maigret_username", "high"),
     ]
+
+
+def test_investigate_username_records_missing_maigret_source(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-maigret-missing-investigate"]) == 0
+    assert main(["investigate", "username", "case-maigret-missing-investigate", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Warning:" in output
+    assert "Missing dependencies for maigret_username" in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-maigret-missing-investigate" / "rekos.db") as connection:
+        row = connection.execute(
+            "SELECT source, error FROM source_investigation_errors"
+        ).fetchone()
+        summary = connection.execute(
+            "SELECT skipped_count, failed_count FROM source_investigations"
+        ).fetchone()
+
+    assert row[0] == "maigret_username"
+    assert "maigret" in row[1]
+    assert summary == (1, 0)
+
+
+def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="https://github.com/alice\n",
+            stderr="",
+        )
+
+    def fake_wmn(self, case: str, target: str) -> str:
+        return json.dumps(
+            {
+                "source": "wmn_username",
+                "target": target,
+                "results": [
+                    {
+                        "platform": "GitHub",
+                        "url": "https://github.com/alice",
+                        "status_code": 200,
+                        "hit": True,
+                        "error": "",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", fake_wmn)
+
+    assert main(["new-case", "case-username-multisource"]) == 0
+    assert main(["investigate", "username", "case-username-multisource", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Discovered profiles: 1" in output
+
+    assert main(["findings", "case-username-multisource"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "Confirming sources (3): maigret_username, sherlock_username, wmn_username" in findings_output
+
+    case_folder = tmp_path / "rekos_cases" / "case-username-multisource"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        profile_count = connection.execute(
+            "SELECT COUNT(*) FROM investigation_profiles"
+        ).fetchone()[0]
+        adapter_sources = [
+            row[0]
+            for row in connection.execute(
+                "SELECT source FROM adapter_results ORDER BY source"
+            ).fetchall()
+        ]
+        finding_rows = connection.execute(
+            """
+            SELECT source, quality_score, quality_reason
+            FROM normalized_findings
+            WHERE value = 'https://github.com/alice'
+            ORDER BY source
+            """
+        ).fetchall()
+        source_summary = connection.execute(
+            "SELECT source_count, result_count, skipped_count, failed_count FROM source_investigations"
+        ).fetchone()
+
+    assert profile_count == 1
+    assert adapter_sources == ["maigret_username", "sherlock_username", "wmn_username"]
+    assert source_summary == (3, 1, 0, 0)
+    assert {row[0] for row in finding_rows} == {
+        "maigret_username",
+        "sherlock_username",
+        "wmn_username",
+    }
+    assert all(row[1] >= 95 for row in finding_rows)
+    assert all("does not claim identity ownership" in row[2] for row in finding_rows)
+    assert all("same URL confirmed by 3 source(s)" in row[2] for row in finding_rows)
 
 
 def test_investigate_username_missing_sherlock(
@@ -986,6 +1198,7 @@ def test_investigate_username_skips_unsafe_double_dot_variant(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
     calls: list[str] = []
 
@@ -1053,7 +1266,7 @@ def test_investigate_username_skips_unsafe_double_dot_variant(
         "ciccio__gamer035",
     ]
     assert adapter_targets == ["cicciogamer035", "ciccio__gamer035"]
-    assert investigation_row == ("username", "ciccio..gamer035", 2, 2, 1, 0)
+    assert investigation_row == ("username", "ciccio..gamer035", 5, 2, 2, 0)
     assert error_row == (
         "sherlock_username",
         "sherlock_username failed for ciccio..gamer035: invalid generated site URL / upstream tool error",
@@ -1062,7 +1275,7 @@ def test_investigate_username_skips_unsafe_double_dot_variant(
     assert main(["show-investigation", "case-unsafe-username"]) == 0
     show_output = capsys.readouterr().out
     assert "Username: ciccio..gamer035" in show_output
-    assert "Skipped: 1" in show_output
+    assert "Skipped: 2" in show_output
     assert "sherlock_username failed for ciccio..gamer035" in show_output
 
 
@@ -1072,6 +1285,7 @@ def test_investigate_username_captures_sherlock_traceback_without_printing(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
 
     def fake_run(cmd, check, capture_output, text, timeout):
@@ -1119,7 +1333,7 @@ def test_investigate_username_captures_sherlock_traceback_without_printing(
             "SELECT COUNT(*) FROM investigation_profiles"
         ).fetchone()[0]
 
-    assert investigation_row == ("username", "Alice.Smith", 3, 3, 0, 1)
+    assert investigation_row == ("username", "Alice.Smith", 7, 3, 1, 1)
     assert error_row == (
         "sherlock_username",
         "sherlock_username failed for Alice.Smith: invalid generated site URL / upstream tool error",
@@ -1131,6 +1345,7 @@ def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
 
     def fake_run(cmd, check, capture_output, text, timeout):
@@ -1291,6 +1506,7 @@ def test_report_renders_investigation_summary(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
 
     def fake_run(cmd, check, capture_output, text, timeout):
@@ -1620,7 +1836,7 @@ def test_score_calculates_quality_and_labels(
                 raw_reference=profile_url,
             ),
             AdapterResult(
-                source="maigret",
+                source="maigret_username",
                 target="alice",
                 url=profile_url,
                 platform="profiles",
@@ -1674,7 +1890,7 @@ def test_score_calculates_quality_and_labels(
     profile_scores = [
         row
         for row in rows
-        if row[0] == profile_url and row[1] in {"sherlock_username", "maigret"}
+        if row[0] == profile_url and row[1] in {"sherlock_username", "maigret_username"}
     ]
     weak_score = next(row for row in rows if row[0] == "https://profiles.example/bob")
     assert all(row[2] >= 75 for row in profile_scores)
@@ -1856,6 +2072,7 @@ def test_snapshot_investigation_continues_on_individual_errors(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
     monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr("rekos.snapshots.importlib.util.find_spec", lambda _name: None)
 

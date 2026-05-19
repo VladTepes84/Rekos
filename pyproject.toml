@@ -39,4 +39,4 @@ rekos = "rekos.cli:console_main"
 include = ["rekos*"]
 
 [tool.setuptools.package-data]
-rekos = ["py.typed"]
+rekos = ["py.typed", "adapters/*.json"]
