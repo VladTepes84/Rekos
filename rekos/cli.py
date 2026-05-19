@@ -9,11 +9,13 @@ from typing import Sequence
 
 from rich.console import Console
 
+from .case_export import export_case
 from .errors import RekosError
 from .hashfile import sha256_file
 from .osint import collect_metadata, scan_username
 from .reporting import render_report
 from .storage import CaseStore
+from .validation import validate_case
 
 
 console = Console()
@@ -43,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     username_scan = subparsers.add_parser("username-scan", help="Run a passive username scan")
     username_scan.add_argument("case")
     username_scan.add_argument("username")
+
+    validate_case_parser = subparsers.add_parser("validate-case", help="Validate a local case")
+    validate_case_parser.add_argument("case")
+
+    export_case_parser = subparsers.add_parser("export-case", help="Export a local case ZIP")
+    export_case_parser.add_argument("case")
+    export_case_parser.add_argument("--output", required=True)
 
     add_note = subparsers.add_parser("add-note", help="Add a note to a case")
     add_note.add_argument("case")
@@ -91,6 +100,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             export_path = scan_username(args.case, args.username, store)
             console.print(f"[green]Completed username scan[/green] {args.username}")
             console.print(f"Export: {export_path}")
+            return 0
+
+        if args.command == "validate-case":
+            result = validate_case(args.case, store)
+            if result.ok:
+                console.print(f"[green]Case validation passed[/green] {args.case}")
+                return 0
+            console.print(f"[yellow]Case validation warnings[/yellow] {args.case}")
+            for warning in result.warnings:
+                console.print(f"- {warning}")
+            return 1
+
+        if args.command == "export-case":
+            result = export_case(args.case, Path(args.output), store)
+            console.print(f"[green]Exported case[/green] {args.case} to {result.output_path}")
+            console.print(f"Files: {result.file_count}")
             return 0
 
         if args.command == "add-note":

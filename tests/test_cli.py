@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import uuid
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -205,6 +207,110 @@ def test_passive_osint_commands_are_registered() -> None:
 
     assert "metadata" in subcommands
     assert "username-scan" in subcommands
+    assert "validate-case" in subcommands
+    assert "export-case" in subcommands
+
+
+def test_validate_case_reports_healthy_case(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    artifact = tmp_path / "healthy.txt"
+    artifact.write_text("healthy sample\n", encoding="utf-8")
+
+    assert main(["new-case", "case-healthy"]) == 0
+    assert main(["hash-file", "case-healthy", str(artifact)]) == 0
+    capsys.readouterr()
+
+    assert main(["validate-case", "case-healthy"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Case validation passed" in output
+
+    db_path = tmp_path / "rekos_cases" / "case-healthy" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT status, warnings FROM validation_summaries"
+        ).fetchone()
+    assert row == ("ok", "")
+
+
+def test_validate_case_detects_missing_db(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    case_folder = tmp_path / "rekos_cases" / "case-no-db"
+    case_folder.mkdir(parents=True)
+
+    assert main(["validate-case", "case-no-db"]) == 1
+
+    output = capsys.readouterr().out
+    assert "SQLite DB missing" in output
+
+
+def test_validate_case_detects_missing_evidence_file(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    artifact = tmp_path / "missing-evidence.txt"
+    artifact.write_text("evidence sample\n", encoding="utf-8")
+
+    assert main(["new-case", "case-missing-evidence"]) == 0
+    assert main(["hash-file", "case-missing-evidence", str(artifact)]) == 0
+    artifact.unlink()
+    capsys.readouterr()
+
+    assert main(["validate-case", "case-missing-evidence"]) == 1
+
+    output = capsys.readouterr().out
+    assert "Evidence file missing" in output
+
+
+def test_validate_case_detects_hash_mismatch(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    artifact = tmp_path / "hash-mismatch.txt"
+    artifact.write_text("original\n", encoding="utf-8")
+
+    assert main(["new-case", "case-hash-mismatch"]) == 0
+    assert main(["hash-file", "case-hash-mismatch", str(artifact)]) == 0
+    artifact.write_text("modified\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["validate-case", "case-hash-mismatch"]) == 1
+
+    output = capsys.readouterr().out
+    assert "Evidence SHA256 mismatch" in output
+
+
+def test_export_case_zip_contains_manifest_files(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    artifact = tmp_path / "outside-evidence.txt"
+    artifact.write_text("outside evidence\n", encoding="utf-8")
+    output_zip = tmp_path / "case-export.zip"
+
+    assert main(["new-case", "case-export"]) == 0
+    assert main(["hash-file", "case-export", str(artifact)]) == 0
+    assert main(["add-note", "case-export", "Export note"]) == 0
+    capsys.readouterr()
+
+    assert main(["export-case", "case-export", "--output", str(output_zip)]) == 0
+
+    assert output_zip.exists()
+    assert not list(tmp_path.glob(".case-export.zip.*.tmp"))
+    with zipfile.ZipFile(output_zip) as archive:
+        names = set(archive.namelist())
+        assert "rekos.db" in names
+        assert "reports/case-report.md" in names
+        assert "manifest.json" in names
+        assert "manifest.sha256" in names
+        assert "outside-evidence.txt" not in names
+        manifest = json.loads(archive.read("manifest.json"))
+        manifest_sha = archive.read("manifest.sha256").decode("utf-8")
+
+    manifest_paths = {entry["path"] for entry in manifest["files"]}
+    assert {"rekos.db", "reports/case-report.md"} <= manifest_paths
+    assert all(entry["sha256"] for entry in manifest["files"])
+    assert "manifest.json" in manifest_sha
 
 
 def test_metadata_returns_clear_error_when_tools_are_missing(

@@ -106,6 +106,23 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("- None recorded")
 
+    lines.extend(["", "## Validation"])
+    if snapshot.validation:
+        lines.extend(
+            [
+                f"- Status: {snapshot.validation.status}",
+                f"- Checked: {snapshot.validation.checked_at}",
+            ]
+        )
+        if snapshot.validation.warnings:
+            lines.append("- Warnings:")
+            for warning in snapshot.validation.warnings:
+                lines.append(f"  - {warning}")
+        else:
+            lines.append("- Warnings: None")
+    else:
+        lines.append("- No validation recorded")
+
     lines.append("")
     return "\n".join(lines)
 

@@ -20,6 +20,7 @@ from .models import (
     NoteRecord,
     TargetRecord,
     TimelineEventRecord,
+    ValidationSummaryRecord,
     UsernameScanRecord,
 )
 from .paths import case_path, database_path, validate_case_name
@@ -210,6 +211,39 @@ class CaseStore:
                 f"Rendered {report_format.strip().lower()} report",
             )
 
+    def record_case_exported(self, case: str, output_path: Path) -> None:
+        with self.connection_for_case(case) as connection:
+            self._insert_timeline_event(
+                connection,
+                "case.exported",
+                f"Exported case to {output_path.name}",
+            )
+
+    def record_validation_summary(
+        self,
+        case: str,
+        status: str,
+        warnings: list[str],
+    ) -> ValidationSummaryRecord:
+        checked_at = utc_now_iso()
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                "DELETE FROM validation_summaries"
+            )
+            connection.execute(
+                """
+                INSERT INTO validation_summaries (status, warnings, checked_at)
+                VALUES (?, ?, ?)
+                """,
+                (status, "\n".join(warnings), checked_at),
+            )
+            self._insert_timeline_event(
+                connection,
+                "case.validated",
+                f"Validated case with status {status}",
+            )
+        return ValidationSummaryRecord(status=status, warnings=warnings, checked_at=checked_at)
+
     def snapshot(self, case: str) -> CaseSnapshot:
         with self.connection_for_case(case) as connection:
             case_row = connection.execute(
@@ -310,6 +344,23 @@ class CaseStore:
                     """
                 ).fetchall()
             ]
+            validation_row = connection.execute(
+                """
+                SELECT status, warnings, checked_at
+                FROM validation_summaries
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+            validation = None
+            if validation_row is not None:
+                warnings_text = validation_row["warnings"]
+                validation = ValidationSummaryRecord(
+                    status=validation_row["status"],
+                    warnings=warnings_text.splitlines() if warnings_text else [],
+                    checked_at=validation_row["checked_at"],
+                )
 
         return CaseSnapshot(
             case=CaseRecord(
@@ -325,6 +376,7 @@ class CaseStore:
             username_scans=username_scans,
             notes=notes,
             timeline=timeline,
+            validation=validation,
         )
 
     def exports_folder(self, case: str) -> Path:
@@ -425,6 +477,13 @@ class CaseStore:
                 event_type TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS validation_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                warnings TEXT NOT NULL,
+                checked_at TEXT NOT NULL
             );
             """
         )

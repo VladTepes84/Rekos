@@ -72,6 +72,13 @@ class TimelineEventRecord:
 
 
 @dataclass(frozen=True)
+class ValidationSummaryRecord:
+    status: str
+    warnings: list[str]
+    checked_at: str
+
+
+@dataclass(frozen=True)
 class CaseSnapshot:
     case: CaseRecord
     targets: list[TargetRecord]
@@ -81,3 +88,4 @@ class CaseSnapshot:
     username_scans: list[UsernameScanRecord]
     notes: list[NoteRecord]
     timeline: list[TimelineEventRecord]
+    validation: Optional[ValidationSummaryRecord]
