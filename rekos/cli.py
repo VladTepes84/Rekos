@@ -99,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "report":
+            store.record_report_rendered(args.case, args.format)
             report_text = render_report(store.snapshot(args.case), args.format)
             console.print(report_text, markup=False)
             return 0

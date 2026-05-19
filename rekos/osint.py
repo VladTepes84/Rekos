@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,7 +108,13 @@ def _write_export(exports_folder: Path, stem: str, raw_output: str) -> Path:
     while export_path.exists():
         export_path = exports_folder / f"{stem}-{counter}.txt"
         counter += 1
-    export_path.write_text(raw_output, encoding="utf-8")
+    temp_path = exports_folder / f".{export_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temp_path.write_text(raw_output, encoding="utf-8")
+        temp_path.replace(export_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
     return export_path
 
 

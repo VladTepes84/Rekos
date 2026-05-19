@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 from .errors import CaseExistsError, CaseNotFoundError
+from .hashfile import sha256_file
 from .models import (
     CaseRecord,
     CaseSnapshot,
+    EvidenceRecord,
     FileHashRecord,
     MetadataRecord,
     NoteRecord,
     TargetRecord,
+    TimelineEventRecord,
     UsernameScanRecord,
 )
 from .paths import case_path, database_path, validate_case_name
@@ -46,10 +50,12 @@ class CaseStore:
         db_path = database_path(cleaned_name, self.cases_root)
         with self._connect(db_path) as connection:
             self._create_schema(connection)
+            created_at = utc_now_iso()
             connection.execute(
-                "INSERT INTO cases (name, created_at) VALUES (?, ?)",
-                (cleaned_name, utc_now_iso()),
+                "INSERT INTO cases (name, uuid, created_at) VALUES (?, ?, ?)",
+                (cleaned_name, str(uuid.uuid4()), created_at),
             )
+            self._insert_timeline_event(connection, "case.created", f"Created case {cleaned_name}")
         return folder
 
     def add_target(self, case: str, target_type: str, value: str) -> TargetRecord:
@@ -67,6 +73,11 @@ class CaseStore:
                 "INSERT INTO targets (target_type, value, added_at) VALUES (?, ?, ?)",
                 (cleaned_type, cleaned_value, added_at),
             )
+            self._insert_timeline_event(
+                connection,
+                "target.added",
+                f"Added {cleaned_type} target {cleaned_value}",
+            )
         return TargetRecord(target_type=cleaned_type, value=cleaned_value, added_at=added_at)
 
     def add_file_hash(self, case: str, file_path: Path, sha256: str, size_bytes: int) -> FileHashRecord:
@@ -80,6 +91,16 @@ class CaseStore:
                 """,
                 (resolved_path, sha256, size_bytes, added_at),
             )
+            self._insert_evidence(
+                connection,
+                evidence_type="file",
+                path=resolved_path,
+                sha256=sha256,
+                created_at=added_at,
+                source_url=None,
+                note=f"Hashed file ({size_bytes} bytes)",
+            )
+            self._insert_timeline_event(connection, "file.hashed", f"Hashed file {file_path.name}")
         return FileHashRecord(
             path=resolved_path,
             sha256=sha256,
@@ -96,6 +117,7 @@ class CaseStore:
         export_path: Path,
     ) -> MetadataRecord:
         added_at = utc_now_iso()
+        export_sha256, _size_bytes = sha256_file(export_path)
         record = MetadataRecord(
             path=str(file_path),
             tools=", ".join(tools),
@@ -111,6 +133,20 @@ class CaseStore:
                 """,
                 (record.path, record.tools, record.raw_output, record.export_path, record.added_at),
             )
+            self._insert_evidence(
+                connection,
+                evidence_type="metadata_export",
+                path=record.export_path,
+                sha256=export_sha256,
+                created_at=added_at,
+                source_url=None,
+                note=f"Metadata output for {file_path.name}",
+            )
+            self._insert_timeline_event(
+                connection,
+                "metadata.collected",
+                f"Collected metadata for {file_path.name}",
+            )
         return record
 
     def add_username_scan(
@@ -121,6 +157,7 @@ class CaseStore:
         export_path: Path,
     ) -> UsernameScanRecord:
         added_at = utc_now_iso()
+        export_sha256, _size_bytes = sha256_file(export_path)
         record = UsernameScanRecord(
             username=username,
             raw_output=raw_output,
@@ -135,6 +172,20 @@ class CaseStore:
                 """,
                 (record.username, record.raw_output, record.export_path, record.added_at),
             )
+            self._insert_evidence(
+                connection,
+                evidence_type="username_scan_export",
+                path=record.export_path,
+                sha256=export_sha256,
+                created_at=added_at,
+                source_url=None,
+                note=f"Username scan output for {username}",
+            )
+            self._insert_timeline_event(
+                connection,
+                "username_scan.completed",
+                f"Completed username scan for {username}",
+            )
         return record
 
     def add_note(self, case: str, text: str) -> NoteRecord:
@@ -148,12 +199,21 @@ class CaseStore:
                 "INSERT INTO notes (text, added_at) VALUES (?, ?)",
                 (cleaned_text, added_at),
             )
+            self._insert_timeline_event(connection, "note.added", "Added note")
         return NoteRecord(text=cleaned_text, added_at=added_at)
+
+    def record_report_rendered(self, case: str, report_format: str) -> None:
+        with self.connection_for_case(case) as connection:
+            self._insert_timeline_event(
+                connection,
+                "report.rendered",
+                f"Rendered {report_format.strip().lower()} report",
+            )
 
     def snapshot(self, case: str) -> CaseSnapshot:
         with self.connection_for_case(case) as connection:
             case_row = connection.execute(
-                "SELECT name, created_at FROM cases LIMIT 1"
+                "SELECT name, uuid, created_at FROM cases LIMIT 1"
             ).fetchone()
             if case_row is None:
                 raise CaseNotFoundError(f"Case metadata is missing: {case}")
@@ -177,6 +237,25 @@ class CaseStore:
                 )
                 for row in connection.execute(
                     "SELECT path, sha256, size_bytes, added_at FROM file_hashes ORDER BY id"
+                ).fetchall()
+            ]
+            evidence = [
+                EvidenceRecord(
+                    evidence_id=row["evidence_id"],
+                    evidence_type=row["evidence_type"],
+                    path=row["path"],
+                    sha256=row["sha256"],
+                    created_at=row["created_at"],
+                    source_url=row["source_url"],
+                    note=row["note"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT evidence_id, type AS evidence_type, path, sha256,
+                           created_at, source_url, note
+                    FROM evidence
+                    ORDER BY id
+                    """
                 ).fetchall()
             ]
             metadata = [
@@ -216,14 +295,36 @@ class CaseStore:
                     "SELECT text, added_at FROM notes ORDER BY id"
                 ).fetchall()
             ]
+            timeline = [
+                TimelineEventRecord(
+                    event_id=row["event_id"],
+                    event_type=row["event_type"],
+                    summary=row["summary"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT event_id, event_type, summary, created_at
+                    FROM timeline_events
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
 
         return CaseSnapshot(
-            case=CaseRecord(name=case_row["name"], created_at=case_row["created_at"]),
+            case=CaseRecord(
+                name=case_row["name"],
+                uuid=case_row["uuid"],
+                created_at=case_row["created_at"],
+                folder=str(case_path(case_row["name"], self.cases_root)),
+            ),
             targets=targets,
             file_hashes=file_hashes,
+            evidence=evidence,
             metadata=metadata,
             username_scans=username_scans,
             notes=notes,
+            timeline=timeline,
         )
 
     def exports_folder(self, case: str) -> Path:
@@ -265,6 +366,7 @@ class CaseStore:
             CREATE TABLE IF NOT EXISTS cases (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 name TEXT NOT NULL UNIQUE,
+                uuid TEXT UNIQUE,
                 created_at TEXT NOT NULL
             );
 
@@ -281,6 +383,17 @@ class CaseStore:
                 sha256 TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
                 added_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evidence_id TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source_url TEXT,
+                note TEXT
             );
 
             CREATE TABLE IF NOT EXISTS notes (
@@ -305,5 +418,93 @@ class CaseStore:
                 export_path TEXT NOT NULL,
                 added_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS timeline_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        self._migrate_schema(connection)
+
+    def _migrate_schema(self, connection: sqlite3.Connection) -> None:
+        case_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(cases)").fetchall()
+        }
+        if "uuid" not in case_columns:
+            connection.execute("ALTER TABLE cases ADD COLUMN uuid TEXT")
+
+        for row in connection.execute("SELECT id FROM cases WHERE uuid IS NULL OR uuid = ''"):
+            connection.execute(
+                "UPDATE cases SET uuid = ? WHERE id = ?",
+                (str(uuid.uuid4()), row["id"]),
+            )
+
+        evidence_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(evidence)").fetchall()
+        }
+        if "evidence_type" in evidence_columns and "type" not in evidence_columns:
+            connection.execute("ALTER TABLE evidence RENAME COLUMN evidence_type TO type")
+
+    def _insert_evidence(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        evidence_type: str,
+        path: str,
+        sha256: str,
+        created_at: str,
+        source_url: Optional[str],
+        note: Optional[str],
+    ) -> EvidenceRecord:
+        record = EvidenceRecord(
+            evidence_id=str(uuid.uuid4()),
+            evidence_type=evidence_type,
+            path=path,
+            sha256=sha256,
+            created_at=created_at,
+            source_url=source_url,
+            note=note,
+        )
+        connection.execute(
+            """
+            INSERT INTO evidence (evidence_id, type, path, sha256, created_at, source_url, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.evidence_id,
+                record.evidence_type,
+                record.path,
+                record.sha256,
+                record.created_at,
+                record.source_url,
+                record.note,
+            ),
+        )
+        return record
+
+    def _insert_timeline_event(
+        self,
+        connection: sqlite3.Connection,
+        event_type: str,
+        summary: str,
+    ) -> TimelineEventRecord:
+        record = TimelineEventRecord(
+            event_id=str(uuid.uuid4()),
+            event_type=event_type,
+            summary=summary,
+            created_at=utc_now_iso(),
+        )
+        connection.execute(
+            """
+            INSERT INTO timeline_events (event_id, event_type, summary, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (record.event_id, record.event_type, record.summary, record.created_at),
+        )
+        return record
