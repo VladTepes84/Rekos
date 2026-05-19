@@ -132,5 +132,51 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("  - None recorded")
 
+    lines.extend(["", "## Investigations"])
+    if snapshot.investigations:
+        for investigation in snapshot.investigations:
+            lines.extend(
+                [
+                    f"- Username: {investigation.username}",
+                    f"  - Variants: {investigation.variant_count}",
+                    f"  - Discovered profiles: {investigation.profile_count}",
+                    f"  - Added: {investigation.created_at}",
+                ]
+            )
+            if investigation.profiles:
+                lines.append("  - Profiles:")
+                for profile in investigation.profiles:
+                    lines.append(
+                        f"    - {profile.profile_url} "
+                        f"({profile.confidence}, from {profile.source_username})"
+                    )
+            else:
+                lines.append("  - Profiles: None recorded")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Snapshots"])
+    if snapshot.snapshots:
+        for snapshot_record in snapshot.snapshots:
+            status = (
+                str(snapshot_record.status_code)
+                if snapshot_record.status_code is not None
+                else "unknown"
+            )
+            lines.extend(
+                [
+                    f"- URL: {snapshot_record.url}",
+                    f"  - Captured: {snapshot_record.captured_at}",
+                    f"  - HTTP status: {status}",
+                    f"  - Headers: `{snapshot_record.headers_path}`",
+                    f"  - Body: `{snapshot_record.body_path}`",
+                    f"  - Evidence: `{snapshot_record.evidence_id}`",
+                ]
+            )
+            if snapshot_record.screenshot_path:
+                lines.append(f"  - Screenshot: `{snapshot_record.screenshot_path}`")
+    else:
+        lines.append("- None recorded")
+
     lines.append("")
     return "\n".join(lines)

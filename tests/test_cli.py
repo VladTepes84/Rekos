@@ -4,9 +4,18 @@ import argparse
 import sqlite3
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from rekos.adapters import BaseSourceAdapter, MaigretAdapter, SherlockAdapter
 from rekos.cli import build_parser, main
+from rekos.errors import ExternalToolMissingError
 from rekos.usernames import username_variants
+
+
+def _raise_missing_maigret(self, case: str, target: str) -> str:
+    raise ExternalToolMissingError("Missing username investigation tool: install maigret.")
 
 
 def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -55,6 +64,10 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "graph-summary" in subcommands
     assert "username-variants" in subcommands
     assert "add-username-target" in subcommands
+    assert "investigate" in subcommands
+    assert "show-investigation" in subcommands
+    assert "snapshot-url" in subcommands
+    assert "snapshot-investigation" in subcommands
 
 
 def test_username_variant_generation_and_deduplication() -> None:
@@ -89,6 +102,69 @@ def test_username_variants_command_outputs_deduplicated_variants(capsys) -> None
     assert "alice.smith_test (high)" in output
     assert "Alice_Smith_test (medium)" in output
     assert "AliceSmithtest (low)" in output
+
+
+def test_source_adapter_interface_contract() -> None:
+    adapter = SherlockAdapter()
+    maigret = MaigretAdapter()
+
+    assert isinstance(adapter, BaseSourceAdapter)
+    assert adapter.name == "sherlock"
+    assert "username" in adapter.supported_target_types
+    assert isinstance(maigret, BaseSourceAdapter)
+    assert maigret.name == "maigret"
+    assert "username" in maigret.supported_target_types
+
+
+def test_sherlock_adapter_parses_output() -> None:
+    adapter = SherlockAdapter()
+
+    results = adapter.parse_results(
+        "alice",
+        """
+        [+] Twitter: https://twitter.com/alice
+        [+] GitHub: https://github.com/alice
+        duplicate https://github.com/alice
+        """,
+    )
+
+    assert [result.source for result in results] == ["sherlock", "sherlock"]
+    assert [result.target for result in results] == ["alice", "alice"]
+    assert [result.url for result in results] == [
+        "https://twitter.com/alice",
+        "https://github.com/alice",
+    ]
+    assert [result.platform for result in results] == ["twitter", "github"]
+    assert [result.confidence for result in results] == ["medium", "medium"]
+
+
+def test_maigret_adapter_parses_output() -> None:
+    adapter = MaigretAdapter()
+
+    results = adapter.parse_results(
+        "alice",
+        """
+        [+] Reddit: https://reddit.com/user/alice
+        [+] GitLab: https://gitlab.com/alice).
+        duplicate https://gitlab.com/alice
+        """,
+    )
+
+    assert [result.source for result in results] == ["maigret", "maigret"]
+    assert [result.target for result in results] == ["alice", "alice"]
+    assert [result.url for result in results] == [
+        "https://reddit.com/user/alice",
+        "https://gitlab.com/alice",
+    ]
+    assert [result.platform for result in results] == ["reddit", "gitlab"]
+    assert [result.confidence for result in results] == ["medium", "medium"]
+
+
+def test_maigret_adapter_missing_tool(monkeypatch) -> None:
+    monkeypatch.setattr("rekos.adapters.maigret.shutil.which", lambda _tool: None)
+
+    with pytest.raises(ExternalToolMissingError, match="maigret"):
+        MaigretAdapter().run("case", "alice")
 
 
 def test_entity_creation_persists_uuid(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -396,6 +472,437 @@ def test_report_renders_username_variants_and_correlations(
     assert "`possible_match` (medium)" in output
     assert "`possible_match` (low)" in output
     assert "username variant correlation" in output
+
+
+def test_investigate_username_with_mocked_sherlock(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        calls.append(cmd)
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        assert timeout == 120
+        assert cmd[:3] == ["/usr/bin/sherlock", "--print-found", "--"]
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"[+] Found: https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-investigate"]) == 0
+    assert main(["investigate", "username", "case-investigate", "Alice.Smith"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed username investigation" in output
+    assert "Variants: 4" in output
+    assert "Discovered profiles: 4" in output
+    assert [call[3] for call in calls] == [
+        "Alice.Smith",
+        "alice.smith",
+        "AliceSmith",
+        "Alice_Smith",
+    ]
+
+    case_folder = tmp_path / "rekos_cases" / "case-investigate"
+    exports = sorted((case_folder / "exports").glob("investigate-username-*.txt"))
+    assert len(exports) == 4
+    assert all("profiles.example" in path.read_text(encoding="utf-8") for path in exports)
+
+    db_path = case_folder / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_rows = connection.execute(
+            "SELECT entity_type, value FROM entities ORDER BY id"
+        ).fetchall()
+        relationship_rows = connection.execute(
+            "SELECT relationship_type, confidence FROM relationships ORDER BY id"
+        ).fetchall()
+        profile_rows = connection.execute(
+            """
+            SELECT source_username, profile_url, confidence, export_path
+            FROM investigation_profiles
+            ORDER BY id
+            """
+        ).fetchall()
+        adapter_rows = connection.execute(
+            """
+            SELECT source, target, url, platform, confidence, raw_reference
+            FROM adapter_results
+            ORDER BY id
+            """
+        ).fetchall()
+        investigation_row = connection.execute(
+            "SELECT username, variant_count, profile_count FROM investigations"
+        ).fetchone()
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM timeline_events ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert investigation_row == ("Alice.Smith", 4, 4)
+    assert [row[0] for row in entity_rows].count("username") == 4
+    assert [row[0] for row in entity_rows].count("url") == 4
+    assert [row[0] for row in relationship_rows].count("possible_match") == 3
+    assert [row[0] for row in relationship_rows].count("discovered_from") == 4
+    assert [row[0] for row in relationship_rows].count("same_target") == 4
+    assert [row[1] for row in profile_rows] == [
+        "https://profiles.example/Alice.Smith",
+        "https://profiles.example/alice.smith",
+        "https://profiles.example/AliceSmith",
+        "https://profiles.example/Alice_Smith",
+    ]
+    assert [row[2] for row in profile_rows] == ["high", "medium", "low", "medium"]
+    assert [row[0] for row in adapter_rows] == ["sherlock"] * 4
+    assert [row[1] for row in adapter_rows] == [
+        "Alice.Smith",
+        "alice.smith",
+        "AliceSmith",
+        "Alice_Smith",
+    ]
+    assert [row[3] for row in adapter_rows] == ["profiles"] * 4
+    assert [row[4] for row in adapter_rows] == ["high", "medium", "low", "medium"]
+    assert all(row[2] == row[5] for row in adapter_rows)
+    assert all(Path(row[3]).exists() for row in profile_rows)
+    assert "investigation.completed" in event_types
+
+
+def test_investigate_username_runs_maigret_and_deduplicates(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        calls.append(cmd)
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        assert timeout == 120
+        assert cmd[1:3] == ["--print-found", "--"]
+        username = cmd[3]
+        if cmd[0] == "/usr/bin/sherlock":
+            stdout = "\n".join(
+                [
+                    f"https://profiles.example/{username}",
+                    f"https://shared.example/{username}",
+                ]
+            )
+        else:
+            assert cmd[0] == "/usr/bin/maigret"
+            stdout = "\n".join(
+                [
+                    f"https://shared.example/{username}",
+                    f"https://maigret.example/{username}",
+                ]
+            )
+        return SimpleNamespace(returncode=0, stdout=f"{stdout}\n", stderr="")
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-maigret-investigate"]) == 0
+    assert main(["investigate", "username", "case-maigret-investigate", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed username investigation" in output
+    assert "Variants: 1" in output
+    assert "Discovered profiles: 3" in output
+    assert [call[0] for call in calls] == ["/usr/bin/sherlock", "/usr/bin/maigret"]
+
+    case_folder = tmp_path / "rekos_cases" / "case-maigret-investigate"
+    assert (case_folder / "exports" / "investigate-username-alice.txt").exists()
+    assert (case_folder / "exports" / "investigate-maigret-alice.txt").exists()
+
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        profile_rows = connection.execute(
+            """
+            SELECT profile_url, confidence
+            FROM investigation_profiles
+            ORDER BY id
+            """
+        ).fetchall()
+        adapter_rows = connection.execute(
+            """
+            SELECT source, target, url, platform, confidence
+            FROM adapter_results
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert profile_rows == [
+        ("https://profiles.example/alice", "high"),
+        ("https://shared.example/alice", "high"),
+        ("https://maigret.example/alice", "high"),
+    ]
+    assert adapter_rows == [
+        ("sherlock", "alice", "https://profiles.example/alice", "profiles", "high"),
+        ("sherlock", "alice", "https://shared.example/alice", "shared", "high"),
+        ("maigret", "alice", "https://maigret.example/alice", "maigret", "high"),
+    ]
+
+
+def test_investigate_username_missing_sherlock(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda _tool: None)
+
+    assert main(["new-case", "case-no-sherlock"]) == 0
+    assert main(["investigate", "username", "case-no-sherlock", "alice"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Missing username investigation tool" in captured.err
+
+
+def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-show-investigation"]) == 0
+    assert main(["investigate", "username", "case-show-investigation", "Alice.Smith"]) == 0
+    capsys.readouterr()
+
+    assert main(["show-investigation", "case-show-investigation"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Username: Alice.Smith" in output
+    assert "Discovered profiles: 4" in output
+    assert "https://profiles.example/Alice.Smith (high) from Alice.Smith" in output
+    assert "https://profiles.example/alice.smith (medium) from alice.smith" in output
+    assert "Graph entities: 8" in output
+    assert "Graph relationships: 11" in output
+    assert "Timeline events:" in output
+
+
+def test_report_renders_investigation_summary(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-investigation-report"]) == 0
+    assert main(["investigate", "username", "case-investigation-report", "Alice.Smith"]) == 0
+    capsys.readouterr()
+
+    assert main(["report", "case-investigation-report"]) == 0
+
+    output = capsys.readouterr().out
+    assert "## Investigations" in output
+    assert "Username: Alice.Smith" in output
+    assert "Discovered profiles: 4" in output
+    assert "https://profiles.example/Alice.Smith (high, from Alice.Smith)" in output
+    assert "https://profiles.example/AliceSmith (low, from AliceSmith)" in output
+
+
+class FakeHttpResponse:
+    def __init__(self, status: int = 200, body: bytes = b"<html>ok</html>") -> None:
+        self.status = status
+        self.headers = {"Content-Type": "text/html; charset=utf-8", "X-Test": "yes"}
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self, _limit: int) -> bytes:
+        return self._body
+
+
+def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        assert timeout == 15
+        return FakeHttpResponse(200, b"<html><title>Public</title></html>")
+
+    monkeypatch.setattr("rekos.snapshots.urlopen", fake_urlopen)
+    monkeypatch.setattr("rekos.snapshots.importlib.util.find_spec", lambda _name: None)
+
+    assert main(["new-case", "case-snapshot"]) == 0
+    assert main(["snapshot-url", "case-snapshot", "https://profiles.example/alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Captured snapshot" in output
+    assert "Screenshot: not captured" in output
+    assert requested_urls == ["https://profiles.example/alice"]
+
+    case_folder = tmp_path / "rekos_cases" / "case-snapshot"
+    snapshot_files = sorted((case_folder / "exports" / "snapshots").iterdir())
+    assert any(path.name.endswith("-headers.json") for path in snapshot_files)
+    assert any(path.name.endswith("-body.html") for path in snapshot_files)
+    assert not any(path.name.endswith("-screenshot.png") for path in snapshot_files)
+
+    db_path = case_folder / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        snapshot_row = connection.execute(
+            """
+            SELECT url, status_code, headers_path, body_path, screenshot_path, evidence_id
+            FROM snapshots
+            """
+        ).fetchone()
+        evidence_row = connection.execute(
+            "SELECT type, path, source_url FROM evidence"
+        ).fetchone()
+        entity_row = connection.execute(
+            "SELECT entity_type, value FROM entities"
+        ).fetchone()
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM timeline_events ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert snapshot_row[0:2] == ("https://profiles.example/alice", 200)
+    assert Path(snapshot_row[2]).exists()
+    assert Path(snapshot_row[3]).read_text(encoding="utf-8") == "<html><title>Public</title></html>"
+    assert snapshot_row[4] == ""
+    assert evidence_row[0] == "url_snapshot"
+    assert evidence_row[1] == snapshot_row[3]
+    assert evidence_row[2] == "https://profiles.example/alice"
+    assert entity_row == ("url", "https://profiles.example/alice")
+    assert "snapshot.created" in event_types
+
+
+def test_snapshot_url_skips_recent_duplicate(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    calls = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        return FakeHttpResponse()
+
+    monkeypatch.setattr("rekos.snapshots.urlopen", fake_urlopen)
+    monkeypatch.setattr("rekos.snapshots.importlib.util.find_spec", lambda _name: None)
+
+    assert main(["new-case", "case-snapshot-duplicate"]) == 0
+    assert main(["snapshot-url", "case-snapshot-duplicate", "https://profiles.example/alice"]) == 0
+    assert main(["snapshot-url", "case-snapshot-duplicate", "https://profiles.example/alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Skipped recent snapshot" in output
+    assert calls == 1
+
+    db_path = tmp_path / "rekos_cases" / "case-snapshot-duplicate" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        snapshot_count = connection.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    assert snapshot_count == 1
+
+
+def test_snapshot_investigation_continues_on_individual_errors(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.snapshots.importlib.util.find_spec", lambda _name: None)
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/AliceSmith"):
+            raise OSError("temporary failure")
+        return FakeHttpResponse(200, f"<html>{request.full_url}</html>".encode("utf-8"))
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+    monkeypatch.setattr("rekos.snapshots.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-snapshot-investigation"]) == 0
+    assert main(["investigate", "username", "case-snapshot-investigation", "Alice.Smith"]) == 0
+    capsys.readouterr()
+
+    assert main(["snapshot-investigation", "case-snapshot-investigation"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Captured: 3" in output
+    assert "Skipped: 0" in output
+    assert "Failed: 1" in output
+    assert "temporary failure" in output
+
+    db_path = tmp_path / "rekos_cases" / "case-snapshot-investigation" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        snapshot_count = connection.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        evidence_count = connection.execute("SELECT COUNT(*) FROM evidence").fetchone()[0]
+    assert snapshot_count == 3
+    assert evidence_count == 3
+
+
+def test_report_renders_snapshot_section(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(200, b"<html>report</html>")
+
+    monkeypatch.setattr("rekos.snapshots.urlopen", fake_urlopen)
+    monkeypatch.setattr("rekos.snapshots.importlib.util.find_spec", lambda _name: None)
+
+    assert main(["new-case", "case-snapshot-report"]) == 0
+    assert main(["snapshot-url", "case-snapshot-report", "https://profiles.example/alice"]) == 0
+    capsys.readouterr()
+
+    assert main(["report", "case-snapshot-report"]) == 0
+
+    output = capsys.readouterr().out
+    assert "## Snapshots" in output
+    assert "URL: https://profiles.example/alice" in output
+    assert "HTTP status: 200" in output
+    assert "Body:" in output
+    assert "Evidence:" in output
 
 
 def test_metadata_returns_clear_error_when_tools_are_missing(

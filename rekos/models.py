@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,17 @@ class FileHashRecord:
     sha256: str
     size_bytes: int
     added_at: str
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    evidence_id: str
+    evidence_type: str
+    path: str
+    sha256: str
+    created_at: str
+    source_url: str
+    note: str
 
 
 @dataclass(frozen=True)
@@ -93,10 +105,51 @@ class TimelineEventRecord:
 
 
 @dataclass(frozen=True)
+class InvestigationProfileRecord:
+    source_username: str
+    profile_url: str
+    confidence: str
+    export_path: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AdapterResultRecord:
+    source: str
+    target: str
+    url: str
+    platform: str
+    confidence: str
+    raw_reference: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class InvestigationSummaryRecord:
+    username: str
+    variant_count: int
+    profile_count: int
+    created_at: str
+    profiles: list[InvestigationProfileRecord]
+
+
+@dataclass(frozen=True)
+class SnapshotRecord:
+    url: str
+    captured_at: str
+    status_code: Optional[int]
+    headers_path: str
+    body_path: str
+    screenshot_path: str
+    evidence_id: str
+
+
+@dataclass(frozen=True)
 class CaseSnapshot:
     case: CaseRecord
     targets: list[TargetRecord]
     file_hashes: list[FileHashRecord]
+    evidence: list[EvidenceRecord]
     metadata: list[MetadataRecord]
     username_scans: list[UsernameScanRecord]
     notes: list[NoteRecord]
@@ -104,3 +157,6 @@ class CaseSnapshot:
     relationships: list[RelationshipRecord]
     graph_summary: GraphSummaryRecord
     timeline: list[TimelineEventRecord]
+    investigations: list[InvestigationSummaryRecord]
+    adapter_results: list[AdapterResultRecord]
+    snapshots: list[SnapshotRecord]

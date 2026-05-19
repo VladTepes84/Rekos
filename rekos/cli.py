@@ -11,8 +11,10 @@ from rich.console import Console
 
 from .errors import RekosError
 from .hashfile import sha256_file
+from .investigation import investigate_username
 from .osint import collect_metadata, scan_username
 from .reporting import render_report
+from .snapshots import snapshot_investigation, snapshot_url
 from .storage import (
     ALLOWED_ENTITY_TYPES,
     ALLOWED_RELATIONSHIP_TYPES,
@@ -83,6 +85,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_username_target.add_argument("case")
     add_username_target.add_argument("username")
+
+    investigate = subparsers.add_parser("investigate", help="Run a passive investigation workflow")
+    investigate_subparsers = investigate.add_subparsers(dest="investigation_type", required=True)
+    investigate_username_parser = investigate_subparsers.add_parser("username", help="Investigate a username")
+    investigate_username_parser.add_argument("case")
+    investigate_username_parser.add_argument("username")
+
+    show_investigation = subparsers.add_parser("show-investigation", help="Show investigation results")
+    show_investigation.add_argument("case")
+
+    snapshot_url_parser = subparsers.add_parser("snapshot-url", help="Capture a public URL snapshot")
+    snapshot_url_parser.add_argument("case")
+    snapshot_url_parser.add_argument("url")
+
+    snapshot_investigation_parser = subparsers.add_parser(
+        "snapshot-investigation",
+        help="Snapshot discovered investigation profile URLs",
+    )
+    snapshot_investigation_parser.add_argument("case")
 
     add_note = subparsers.add_parser("add-note", help="Add a note to a case")
     add_note.add_argument("case")
@@ -201,6 +222,61 @@ def main(argv: Sequence[str] | None = None) -> int:
             console.print(f"[green]Added username target[/green] {original.value}")
             console.print(f"Original UUID: [bold]{original.entity_id}[/bold]")
             console.print(f"Variants: {len(variants)}")
+            return 0
+
+        if args.command == "investigate" and args.investigation_type == "username":
+            result = investigate_username(args.case, args.username, store)
+            console.print(f"[green]Completed username investigation[/green] {result.username}")
+            console.print(f"Variants: {len(result.variants)}")
+            console.print(f"Discovered profiles: {len(result.profiles)}")
+            return 0
+
+        if args.command == "show-investigation":
+            investigations = store.investigations(args.case)
+            if not investigations:
+                console.print("No investigations recorded")
+            for investigation in investigations:
+                console.print(f"Username: {investigation.username}")
+                console.print(f"Variants: {investigation.variant_count}")
+                console.print(f"Discovered profiles: {investigation.profile_count}")
+                if investigation.profiles:
+                    for profile in investigation.profiles:
+                        console.print(
+                            f"- {profile.profile_url} "
+                            f"({profile.confidence}) from {profile.source_username}"
+                        )
+                else:
+                    console.print("- No profiles discovered")
+            summary = store.graph_summary(args.case)
+            console.print(f"Graph entities: {summary.total_entities}")
+            console.print(f"Graph relationships: {summary.total_relationships}")
+            timeline = store.snapshot(args.case).timeline
+            console.print(f"Timeline events: {len(timeline)}")
+            for event in timeline[-5:]:
+                console.print(f"- {event.event_type}: {event.summary}")
+            return 0
+
+        if args.command == "snapshot-url":
+            result = snapshot_url(args.case, args.url, store)
+            if result.skipped:
+                console.print(f"[yellow]Skipped recent snapshot[/yellow] {result.url}")
+                return 0
+            console.print(f"[green]Captured snapshot[/green] {result.url}")
+            console.print(f"Body: {result.body_path}")
+            console.print(f"Headers: {result.headers_path}")
+            if result.screenshot_path:
+                console.print(f"Screenshot: {result.screenshot_path}")
+            else:
+                console.print("Screenshot: not captured")
+            return 0
+
+        if args.command == "snapshot-investigation":
+            result = snapshot_investigation(args.case, store)
+            console.print(f"Captured: {result.captured}")
+            console.print(f"Skipped: {result.skipped}")
+            console.print(f"Failed: {result.failed}")
+            for error in result.errors:
+                console.print(f"- {error}")
             return 0
 
         if args.command == "add-note":

@@ -5,21 +5,28 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 from .errors import CaseExistsError, CaseNotFoundError
+from .hashfile import sha256_file
+from .adapters import AdapterResult
 from .models import (
+    AdapterResultRecord,
     CaseRecord,
     CaseSnapshot,
     ConnectedEntityRecord,
     EntityRecord,
+    EvidenceRecord,
     FileHashRecord,
     GraphSummaryRecord,
+    InvestigationProfileRecord,
+    InvestigationSummaryRecord,
     MetadataRecord,
     NoteRecord,
     RelationshipRecord,
+    SnapshotRecord,
     TargetRecord,
     TimelineEventRecord,
     UsernameScanRecord,
@@ -36,6 +43,7 @@ ALLOWED_RELATIONSHIP_TYPES = {
     "same_target",
     "referenced_by",
     "extracted_from",
+    "discovered_from",
 }
 ALLOWED_CONFIDENCES = {"low", "medium", "high"}
 
@@ -314,6 +322,283 @@ class CaseStore:
                 )
         return original_record, variant_records
 
+    def add_username_investigation(
+        self,
+        case: str,
+        username: str,
+        variants: list[UsernameVariant],
+        profiles: list[dict[str, str]],
+    ) -> InvestigationSummaryRecord:
+        if not variants:
+            raise ValueError("Investigation requires at least one username variant.")
+
+        created_at = utc_now_iso()
+        original_record = self._entity_record("username", variants[0].value, "investigation username")
+        variant_records = [
+            self._entity_record("username", variant.value, "investigation username variant")
+            for variant in variants[1:]
+        ]
+        profile_records = [
+            InvestigationProfileRecord(
+                source_username=profile["source_username"],
+                profile_url=profile["profile_url"],
+                confidence=profile["confidence"],
+                export_path=profile["export_path"],
+                created_at=created_at,
+            )
+            for profile in profiles
+        ]
+
+        with self.connection_for_case(case) as connection:
+            self._insert_entity(connection, original_record)
+            self._insert_timeline_event(
+                connection,
+                "entity.created",
+                f"Created investigation username entity {original_record.value}",
+            )
+            username_entities = {original_record.value: original_record}
+            for variant, record in zip(variants[1:], variant_records):
+                self._insert_entity(connection, record)
+                username_entities[record.value] = record
+                self._insert_timeline_event(
+                    connection,
+                    "entity.created",
+                    f"Created investigation username variant entity {record.value}",
+                )
+                self._insert_relationship(
+                    connection,
+                    source_entity_id=original_record.entity_id,
+                    target_entity_id=record.entity_id,
+                    relationship_type="possible_match",
+                    confidence=_variant_confidence(variant),
+                    note="username variant correlation",
+                )
+
+            connection.execute(
+                """
+                INSERT INTO investigations (username, variant_count, profile_count, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (username, len(variants), len(profile_records), created_at),
+            )
+            investigation_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            for profile in profile_records:
+                profile_entity = self._entity_record(
+                    "url",
+                    profile.profile_url,
+                    f"profile discovered from {profile.source_username}",
+                )
+                self._insert_entity(connection, profile_entity)
+                self._insert_timeline_event(
+                    connection,
+                    "entity.created",
+                    f"Created profile URL entity {profile.profile_url}",
+                )
+                source_entity = username_entities[profile.source_username]
+                self._insert_relationship(
+                    connection,
+                    source_entity_id=source_entity.entity_id,
+                    target_entity_id=profile_entity.entity_id,
+                    relationship_type="discovered_from",
+                    confidence=profile.confidence,
+                    note="profile URL discovered by username investigation",
+                )
+                self._insert_relationship(
+                    connection,
+                    source_entity_id=original_record.entity_id,
+                    target_entity_id=profile_entity.entity_id,
+                    relationship_type="same_target",
+                    confidence=profile.confidence,
+                    note="profile URL correlated to investigated username",
+                )
+                connection.execute(
+                    """
+                    INSERT INTO investigation_profiles (
+                        investigation_id,
+                        source_username,
+                        profile_url,
+                        confidence,
+                        export_path,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        investigation_id,
+                        profile.source_username,
+                        profile.profile_url,
+                        profile.confidence,
+                        profile.export_path,
+                        profile.created_at,
+                    ),
+                )
+
+            self._insert_timeline_event(
+                connection,
+                "investigation.completed",
+                f"Completed username investigation for {username}",
+            )
+
+        return InvestigationSummaryRecord(
+            username=username,
+            variant_count=len(variants),
+            profile_count=len(profile_records),
+            created_at=created_at,
+            profiles=profile_records,
+        )
+
+    def investigations(self, case: str) -> list[InvestigationSummaryRecord]:
+        with self.connection_for_case(case) as connection:
+            return self._load_investigations(connection)
+
+    def add_adapter_results(self, case: str, results: list[AdapterResult]) -> list[AdapterResultRecord]:
+        created_at = utc_now_iso()
+        records = [
+            AdapterResultRecord(
+                source=result.source,
+                target=result.target,
+                url=result.url,
+                platform=result.platform,
+                confidence=result.confidence,
+                raw_reference=result.raw_reference,
+                created_at=created_at,
+            )
+            for result in results
+        ]
+        if not records:
+            return []
+        with self.connection_for_case(case) as connection:
+            connection.executemany(
+                """
+                INSERT INTO adapter_results (
+                    source,
+                    target,
+                    url,
+                    platform,
+                    confidence,
+                    raw_reference,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        record.source,
+                        record.target,
+                        record.url,
+                        record.platform,
+                        record.confidence,
+                        record.raw_reference,
+                        record.created_at,
+                    )
+                    for record in records
+                ],
+            )
+        return records
+
+    def recent_snapshot(
+        self,
+        case: str,
+        url: str,
+        interval_seconds: int,
+    ) -> Optional[SnapshotRecord]:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=interval_seconds)
+        with self.connection_for_case(case) as connection:
+            row = connection.execute(
+                """
+                SELECT url, captured_at, status_code, headers_path, body_path,
+                       screenshot_path, evidence_id
+                FROM snapshots
+                WHERE url = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (url,),
+            ).fetchone()
+        if row is None:
+            return None
+        captured_at = datetime.fromisoformat(row["captured_at"])
+        if captured_at < cutoff:
+            return None
+        return SnapshotRecord(
+            url=row["url"],
+            captured_at=row["captured_at"],
+            status_code=row["status_code"],
+            headers_path=row["headers_path"],
+            body_path=row["body_path"],
+            screenshot_path=row["screenshot_path"],
+            evidence_id=row["evidence_id"],
+        )
+
+    def add_url_snapshot(
+        self,
+        case: str,
+        url: str,
+        status_code: Optional[int],
+        headers_path: Path,
+        body_path: Path,
+        screenshot_path: Optional[Path],
+    ) -> SnapshotRecord:
+        captured_at = utc_now_iso()
+        evidence_id = str(uuid.uuid4())
+        digest, _size_bytes = sha256_file(body_path)
+        record = SnapshotRecord(
+            url=url,
+            captured_at=captured_at,
+            status_code=status_code,
+            headers_path=str(headers_path),
+            body_path=str(body_path),
+            screenshot_path=str(screenshot_path or ""),
+            evidence_id=evidence_id,
+        )
+        with self.connection_for_case(case) as connection:
+            self._ensure_url_entity(connection, url)
+            connection.execute(
+                """
+                INSERT INTO evidence (evidence_id, type, path, sha256, created_at, source_url, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence_id,
+                    "url_snapshot",
+                    str(body_path),
+                    digest,
+                    captured_at,
+                    url,
+                    "Public URL snapshot body artifact",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO snapshots (
+                    url,
+                    captured_at,
+                    status_code,
+                    headers_path,
+                    body_path,
+                    screenshot_path,
+                    evidence_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.url,
+                    record.captured_at,
+                    record.status_code,
+                    record.headers_path,
+                    record.body_path,
+                    record.screenshot_path,
+                    record.evidence_id,
+                ),
+            )
+            self._insert_timeline_event(
+                connection,
+                "snapshot.created",
+                f"Captured public URL snapshot {url}",
+            )
+        return record
+
     def snapshot(self, case: str) -> CaseSnapshot:
         with self.connection_for_case(case) as connection:
             case_row = connection.execute(
@@ -341,6 +626,24 @@ class CaseStore:
                 )
                 for row in connection.execute(
                     "SELECT path, sha256, size_bytes, added_at FROM file_hashes ORDER BY id"
+                ).fetchall()
+            ]
+            evidence = [
+                EvidenceRecord(
+                    evidence_id=row["evidence_id"],
+                    evidence_type=row["type"],
+                    path=row["path"],
+                    sha256=row["sha256"],
+                    created_at=row["created_at"],
+                    source_url=row["source_url"],
+                    note=row["note"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT evidence_id, type, path, sha256, created_at, source_url, note
+                    FROM evidence
+                    ORDER BY id
+                    """
                 ).fetchall()
             ]
             metadata = [
@@ -411,11 +714,50 @@ class CaseStore:
                 ).fetchall()
             ]
             graph_summary = self._graph_summary(connection)
+            investigations = self._load_investigations(connection)
+            adapter_results = [
+                AdapterResultRecord(
+                    source=row["source"],
+                    target=row["target"],
+                    url=row["url"],
+                    platform=row["platform"],
+                    confidence=row["confidence"],
+                    raw_reference=row["raw_reference"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT source, target, url, platform, confidence, raw_reference, created_at
+                    FROM adapter_results
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
+            snapshots = [
+                SnapshotRecord(
+                    url=row["url"],
+                    captured_at=row["captured_at"],
+                    status_code=row["status_code"],
+                    headers_path=row["headers_path"],
+                    body_path=row["body_path"],
+                    screenshot_path=row["screenshot_path"],
+                    evidence_id=row["evidence_id"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT url, captured_at, status_code, headers_path, body_path,
+                           screenshot_path, evidence_id
+                    FROM snapshots
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
 
         return CaseSnapshot(
             case=CaseRecord(name=case_row["name"], created_at=case_row["created_at"]),
             targets=targets,
             file_hashes=file_hashes,
+            evidence=evidence,
             metadata=metadata,
             username_scans=username_scans,
             notes=notes,
@@ -423,6 +765,9 @@ class CaseStore:
             relationships=relationships,
             graph_summary=graph_summary,
             timeline=timeline,
+            investigations=investigations,
+            adapter_results=adapter_results,
+            snapshots=snapshots,
         )
 
     def exports_folder(self, case: str) -> Path:
@@ -488,6 +833,17 @@ class CaseStore:
                 added_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evidence_id TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                note TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS metadata_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT NOT NULL,
@@ -532,6 +888,48 @@ class CaseStore:
                 event_type TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS investigations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                variant_count INTEGER NOT NULL,
+                profile_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS investigation_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                investigation_id INTEGER NOT NULL,
+                source_username TEXT NOT NULL,
+                profile_url TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                export_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (investigation_id) REFERENCES investigations (id)
+            );
+
+            CREATE TABLE IF NOT EXISTS adapter_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                url TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                raw_reference TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                status_code INTEGER,
+                headers_path TEXT NOT NULL,
+                body_path TEXT NOT NULL,
+                screenshot_path TEXT NOT NULL,
+                evidence_id TEXT NOT NULL,
+                FOREIGN KEY (evidence_id) REFERENCES evidence (evidence_id)
             );
             """
         )
@@ -596,6 +994,44 @@ class CaseStore:
             most_connected=most_connected,
         )
 
+    def _load_investigations(self, connection: sqlite3.Connection) -> list[InvestigationSummaryRecord]:
+        investigations: list[InvestigationSummaryRecord] = []
+        for row in connection.execute(
+            """
+            SELECT id, username, variant_count, profile_count, created_at
+            FROM investigations
+            ORDER BY id
+            """
+        ).fetchall():
+            profiles = [
+                InvestigationProfileRecord(
+                    source_username=profile["source_username"],
+                    profile_url=profile["profile_url"],
+                    confidence=profile["confidence"],
+                    export_path=profile["export_path"],
+                    created_at=profile["created_at"],
+                )
+                for profile in connection.execute(
+                    """
+                    SELECT source_username, profile_url, confidence, export_path, created_at
+                    FROM investigation_profiles
+                    WHERE investigation_id = ?
+                    ORDER BY id
+                    """,
+                    (row["id"],),
+                ).fetchall()
+            ]
+            investigations.append(
+                InvestigationSummaryRecord(
+                    username=row["username"],
+                    variant_count=row["variant_count"],
+                    profile_count=row["profile_count"],
+                    created_at=row["created_at"],
+                    profiles=profiles,
+                )
+            )
+        return investigations
+
     def _entity_record(self, entity_type: str, value: str, note: str) -> EntityRecord:
         return EntityRecord(
             entity_id=str(uuid.uuid4()),
@@ -604,6 +1040,35 @@ class CaseStore:
             note=note,
             created_at=utc_now_iso(),
         )
+
+    def _ensure_url_entity(self, connection: sqlite3.Connection, url: str) -> EntityRecord:
+        row = connection.execute(
+            """
+            SELECT entity_id, entity_type, value, note, created_at
+            FROM entities
+            WHERE entity_type = 'url' AND value = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (url,),
+        ).fetchone()
+        if row is not None:
+            return EntityRecord(
+                entity_id=row["entity_id"],
+                entity_type=row["entity_type"],
+                value=row["value"],
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+
+        record = self._entity_record("url", url, "snapshot URL")
+        self._insert_entity(connection, record)
+        self._insert_timeline_event(
+            connection,
+            "entity.created",
+            f"Created URL entity {url}",
+        )
+        return record
 
     def _insert_entity(
         self,
