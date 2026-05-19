@@ -199,8 +199,9 @@ def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert "REKOS READY" in output
-    assert "rekos 0.1.0" in output
+    assert output == "rekos 0.1.0\n"
+    assert "REKOS READY" not in output
+    assert "██████" not in output
 
 
 def test_banner_renderer_falls_back_without_pyfiglet(monkeypatch) -> None:
@@ -310,6 +311,7 @@ def test_pyproject_exposes_username_optional_dependencies() -> None:
 
 def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
     monkeypatch.setattr("rekos.adapters.base.shutil.which", lambda _dependency: None)
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
 
     assert main(["sources", "check"]) == 0
 
@@ -322,6 +324,21 @@ def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
     assert "maigret: missing" in output
     assert "pipx inject rekos maigret" in output
     assert "install REKOS with [full]" in output
+
+
+def test_sources_check_detects_mocked_maigret_availability(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("rekos.adapters.base.shutil.which", lambda _dependency: None)
+    monkeypatch.setattr(
+        "rekos.adapters.maigret._resolve_maigret_command",
+        lambda: ["/pipx/venv/bin/maigret"],
+    )
+
+    assert main(["sources", "check"]) == 0
+
+    output = capsys.readouterr().out
+    assert "maigret_username:" in output
+    assert "maigret: available" in output
+    assert "maigret: missing" not in output
 
 
 def test_sources_run_missing_dependency(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -380,10 +397,29 @@ def test_maigret_adapter_parses_output() -> None:
 
 
 def test_maigret_adapter_missing_tool(monkeypatch) -> None:
-    monkeypatch.setattr("rekos.adapters.maigret.shutil.which", lambda _tool: None)
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
 
     with pytest.raises(ExternalToolMissingError, match="maigret"):
         MaigretAdapter().run("case", "alice")
+
+
+def test_maigret_adapter_runs_module_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rekos.adapters.maigret._resolve_maigret_command",
+        lambda: [sys.executable, "-m", "maigret"],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="https://example.com/alice\n", stderr="")
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    raw_output = MaigretAdapter().run("case", "alice")
+
+    assert calls == [[sys.executable, "-m", "maigret", "--print-found", "--", "alice"]]
+    assert "https://example.com/alice" in raw_output
 
 
 def test_wmn_adapter_parses_mocked_hit() -> None:

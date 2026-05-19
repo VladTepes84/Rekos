@@ -200,7 +200,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "version":
-            banner_console.print(render_banner())
             console.print(f"rekos {__version__}")
             return 0
 

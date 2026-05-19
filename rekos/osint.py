@@ -67,10 +67,13 @@ def _run_tool(tool: str, args: list[str]) -> CommandOutput:
     executable = shutil.which(tool)
     if executable is None:
         raise ExternalToolMissingError(f"Missing required tool: {tool}.")
+    return _run_command([executable, *args], tool)
 
+
+def _run_command(command: list[str], tool: str) -> CommandOutput:
     try:
         completed = subprocess.run(
-            [executable, *args],
+            command,
             check=False,
             capture_output=True,
             text=True,
