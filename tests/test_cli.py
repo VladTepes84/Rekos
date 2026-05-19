@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import uuid
 from pathlib import Path
 
 from rekos.cli import build_parser, main
@@ -47,6 +48,241 @@ def test_passive_osint_commands_are_registered() -> None:
 
     assert "metadata" in subcommands
     assert "username-scan" in subcommands
+    assert "add-entity" in subcommands
+    assert "relate-entities" in subcommands
+    assert "list-entities" in subcommands
+    assert "graph-summary" in subcommands
+
+
+def test_entity_creation_persists_uuid(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-graph"]) == 0
+    assert main(
+        [
+            "add-entity",
+            "case-graph",
+            "--type",
+            "username",
+            "--value",
+            "alice",
+            "--note",
+            "public profile",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "Added entity" in output
+
+    db_path = tmp_path / "rekos_cases" / "case-graph" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT entity_id, entity_type, value, note FROM entities"
+        ).fetchone()
+        event_type = connection.execute(
+            "SELECT event_type FROM timeline_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+
+    uuid.UUID(row[0])
+    assert row[1:] == ("username", "alice", "public profile")
+    assert event_type == "entity.created"
+
+
+def test_relationship_creation_persists_with_confidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-rel"]) == 0
+    assert main(["add-entity", "case-rel", "--type", "username", "--value", "alice"]) == 0
+    assert main(["add-entity", "case-rel", "--type", "domain", "--value", "example.com"]) == 0
+
+    db_path = tmp_path / "rekos_cases" / "case-rel" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT entity_id FROM entities ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert main(
+        [
+            "relate-entities",
+            "case-rel",
+            "--from",
+            entity_ids[0],
+            "--to",
+            entity_ids[1],
+            "--type",
+            "same_target",
+            "--confidence",
+            "high",
+            "--note",
+            "profile links domain",
+        ]
+    ) == 0
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT relationship_id, source_entity_id, target_entity_id,
+                   relationship_type, confidence, note
+            FROM relationships
+            """
+        ).fetchone()
+        event_type = connection.execute(
+            "SELECT event_type FROM timeline_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+
+    uuid.UUID(row[0])
+    assert row[1:] == (
+        entity_ids[0],
+        entity_ids[1],
+        "same_target",
+        "high",
+        "profile links domain",
+    )
+    assert event_type == "relationship.created"
+
+
+def test_relationship_confidence_validation(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-confidence"]) == 0
+    assert main(["add-entity", "case-confidence", "--type", "username", "--value", "alice"]) == 0
+    assert main(["add-entity", "case-confidence", "--type", "domain", "--value", "example.com"]) == 0
+
+    db_path = tmp_path / "rekos_cases" / "case-confidence" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT entity_id FROM entities ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert main(
+        [
+            "relate-entities",
+            "case-confidence",
+            "--from",
+            entity_ids[0],
+            "--to",
+            entity_ids[1],
+            "--type",
+            "related_to",
+            "--confidence",
+            "certain",
+        ]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert "Unsupported confidence" in captured.err
+
+
+def test_graph_summary_counts_and_most_connected(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-summary"]) == 0
+    assert main(["add-entity", "case-summary", "--type", "username", "--value", "alice"]) == 0
+    assert main(["add-entity", "case-summary", "--type", "domain", "--value", "example.com"]) == 0
+    assert main(["add-entity", "case-summary", "--type", "url", "--value", "https://example.com/a"]) == 0
+
+    db_path = tmp_path / "rekos_cases" / "case-summary" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT entity_id FROM entities ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert main(
+        [
+            "relate-entities",
+            "case-summary",
+            "--from",
+            entity_ids[0],
+            "--to",
+            entity_ids[1],
+            "--type",
+            "same_target",
+            "--confidence",
+            "medium",
+        ]
+    ) == 0
+    assert main(
+        [
+            "relate-entities",
+            "case-summary",
+            "--from",
+            entity_ids[1],
+            "--to",
+            entity_ids[2],
+            "--type",
+            "referenced_by",
+            "--confidence",
+            "low",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert main(["graph-summary", "case-summary"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Total entities: 3" in output
+    assert "Total relationships: 2" in output
+    assert "- domain: 1" in output
+    assert "- username: 1" in output
+    assert "example.com (2)" in output
+
+
+def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-report-graph"]) == 0
+    assert main(["add-entity", "case-report-graph", "--type", "email", "--value", "a@example.com"]) == 0
+    assert main(["add-entity", "case-report-graph", "--type", "domain", "--value", "example.com"]) == 0
+
+    db_path = tmp_path / "rekos_cases" / "case-report-graph" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT entity_id FROM entities ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert main(
+        [
+            "relate-entities",
+            "case-report-graph",
+            "--from",
+            entity_ids[0],
+            "--to",
+            entity_ids[1],
+            "--type",
+            "possible_match",
+            "--confidence",
+            "medium",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert main(["report", "case-report-graph"]) == 0
+
+    output = capsys.readouterr().out
+    assert "## Entities" in output
+    assert "`email`: a@example.com" in output
+    assert "## Relationships" in output
+    assert "`possible_match` (medium)" in output
+    assert "## Graph Summary" in output
+    assert "Total entities: 2" in output
 
 
 def test_metadata_returns_clear_error_when_tools_are_missing(

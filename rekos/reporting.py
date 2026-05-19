@@ -77,5 +77,60 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("- None recorded")
 
+    lines.extend(["", "## Entities"])
+    if snapshot.entities:
+        for entity in snapshot.entities:
+            lines.extend(
+                [
+                    f"- `{entity.entity_type}`: {entity.value}",
+                    f"  - UUID: `{entity.entity_id}`",
+                    f"  - Added: {entity.created_at}",
+                ]
+            )
+            if entity.note:
+                lines.append(f"  - Note: {entity.note}")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Relationships"])
+    if snapshot.relationships:
+        for relationship in snapshot.relationships:
+            lines.extend(
+                [
+                    f"- `{relationship.relationship_type}` ({relationship.confidence})",
+                    f"  - UUID: `{relationship.relationship_id}`",
+                    f"  - From: `{relationship.source_entity_id}`",
+                    f"  - To: `{relationship.target_entity_id}`",
+                    f"  - Added: {relationship.created_at}",
+                ]
+            )
+            if relationship.note:
+                lines.append(f"  - Note: {relationship.note}")
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Graph Summary"])
+    lines.extend(
+        [
+            f"- Total entities: {snapshot.graph_summary.total_entities}",
+            f"- Total relationships: {snapshot.graph_summary.total_relationships}",
+            "- Entity type counts:",
+        ]
+    )
+    if snapshot.graph_summary.entity_type_counts:
+        for entity_type, count in snapshot.graph_summary.entity_type_counts.items():
+            lines.append(f"  - {entity_type}: {count}")
+    else:
+        lines.append("  - None recorded")
+    lines.append("- Most connected entities:")
+    if snapshot.graph_summary.most_connected:
+        for entity in snapshot.graph_summary.most_connected:
+            lines.append(
+                f"  - `{entity.entity_id}` {entity.entity_type}: "
+                f"{entity.value} ({entity.connection_count})"
+            )
+    else:
+        lines.append("  - None recorded")
+
     lines.append("")
     return "\n".join(lines)

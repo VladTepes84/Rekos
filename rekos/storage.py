@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,16 +13,30 @@ from .errors import CaseExistsError, CaseNotFoundError
 from .models import (
     CaseRecord,
     CaseSnapshot,
+    ConnectedEntityRecord,
+    EntityRecord,
     FileHashRecord,
+    GraphSummaryRecord,
     MetadataRecord,
     NoteRecord,
+    RelationshipRecord,
     TargetRecord,
+    TimelineEventRecord,
     UsernameScanRecord,
 )
 from .paths import case_path, database_path, validate_case_name
 
 
 ALLOWED_TARGET_TYPES = {"username"}
+ALLOWED_ENTITY_TYPES = {"username", "email", "domain", "url", "ip", "phone", "file", "note"}
+ALLOWED_RELATIONSHIP_TYPES = {
+    "related_to",
+    "possible_match",
+    "same_target",
+    "referenced_by",
+    "extracted_from",
+}
+ALLOWED_CONFIDENCES = {"low", "medium", "high"}
 
 
 def utc_now_iso() -> str:
@@ -150,6 +165,121 @@ class CaseStore:
             )
         return NoteRecord(text=cleaned_text, added_at=added_at)
 
+    def add_entity(
+        self,
+        case: str,
+        entity_type: str,
+        value: str,
+        note: str = "",
+    ) -> EntityRecord:
+        cleaned_type = entity_type.strip().lower()
+        cleaned_value = value.strip()
+        cleaned_note = note.strip()
+        if cleaned_type not in ALLOWED_ENTITY_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_ENTITY_TYPES))
+            raise ValueError(f"Unsupported entity type '{entity_type}'. Allowed: {allowed}.")
+        if not cleaned_value:
+            raise ValueError("Entity value cannot be empty.")
+
+        record = EntityRecord(
+            entity_id=str(uuid.uuid4()),
+            entity_type=cleaned_type,
+            value=cleaned_value,
+            note=cleaned_note,
+            created_at=utc_now_iso(),
+        )
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO entities (entity_id, entity_type, value, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    record.entity_id,
+                    record.entity_type,
+                    record.value,
+                    record.note,
+                    record.created_at,
+                ),
+            )
+            self._insert_timeline_event(
+                connection,
+                "entity.created",
+                f"Created {record.entity_type} entity {record.value}",
+            )
+        return record
+
+    def relate_entities(
+        self,
+        case: str,
+        source_entity_id: str,
+        target_entity_id: str,
+        relationship_type: str,
+        confidence: str,
+        note: str = "",
+    ) -> RelationshipRecord:
+        cleaned_relationship = relationship_type.strip().lower()
+        cleaned_confidence = confidence.strip().lower()
+        cleaned_note = note.strip()
+        if cleaned_relationship not in ALLOWED_RELATIONSHIP_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_RELATIONSHIP_TYPES))
+            raise ValueError(f"Unsupported relationship type '{relationship_type}'. Allowed: {allowed}.")
+        if cleaned_confidence not in ALLOWED_CONFIDENCES:
+            allowed = ", ".join(sorted(ALLOWED_CONFIDENCES))
+            raise ValueError(f"Unsupported confidence '{confidence}'. Allowed: {allowed}.")
+        if source_entity_id == target_entity_id:
+            raise ValueError("Relationship endpoints must be different entities.")
+
+        record = RelationshipRecord(
+            relationship_id=str(uuid.uuid4()),
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=cleaned_relationship,
+            confidence=cleaned_confidence,
+            note=cleaned_note,
+            created_at=utc_now_iso(),
+        )
+        with self.connection_for_case(case) as connection:
+            self._require_entity(connection, source_entity_id)
+            self._require_entity(connection, target_entity_id)
+            connection.execute(
+                """
+                INSERT INTO relationships (
+                    relationship_id,
+                    source_entity_id,
+                    target_entity_id,
+                    relationship_type,
+                    confidence,
+                    note,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.relationship_id,
+                    record.source_entity_id,
+                    record.target_entity_id,
+                    record.relationship_type,
+                    record.confidence,
+                    record.note,
+                    record.created_at,
+                ),
+            )
+            self._insert_timeline_event(
+                connection,
+                "relationship.created",
+                f"Created {record.relationship_type} relationship",
+            )
+        return record
+
+    def list_entities(self, case: str) -> list[EntityRecord]:
+        with self.connection_for_case(case) as connection:
+            return self._load_entities(connection)
+
+    def graph_summary(self, case: str) -> GraphSummaryRecord:
+        with self.connection_for_case(case) as connection:
+            return self._graph_summary(connection)
+
     def snapshot(self, case: str) -> CaseSnapshot:
         with self.connection_for_case(case) as connection:
             case_row = connection.execute(
@@ -216,6 +346,37 @@ class CaseStore:
                     "SELECT text, added_at FROM notes ORDER BY id"
                 ).fetchall()
             ]
+            entities = self._load_entities(connection)
+            relationships = [
+                RelationshipRecord(
+                    relationship_id=row["relationship_id"],
+                    source_entity_id=row["source_entity_id"],
+                    target_entity_id=row["target_entity_id"],
+                    relationship_type=row["relationship_type"],
+                    confidence=row["confidence"],
+                    note=row["note"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT relationship_id, source_entity_id, target_entity_id,
+                           relationship_type, confidence, note, created_at
+                    FROM relationships
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
+            timeline = [
+                TimelineEventRecord(
+                    event_type=row["event_type"],
+                    summary=row["summary"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    "SELECT event_type, summary, created_at FROM timeline_events ORDER BY id"
+                ).fetchall()
+            ]
+            graph_summary = self._graph_summary(connection)
 
         return CaseSnapshot(
             case=CaseRecord(name=case_row["name"], created_at=case_row["created_at"]),
@@ -224,6 +385,10 @@ class CaseStore:
             metadata=metadata,
             username_scans=username_scans,
             notes=notes,
+            entities=entities,
+            relationships=relationships,
+            graph_summary=graph_summary,
+            timeline=timeline,
         )
 
     def exports_folder(self, case: str) -> Path:
@@ -305,5 +470,116 @@ class CaseStore:
                 export_path TEXT NOT NULL,
                 added_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL UNIQUE,
+                entity_type TEXT NOT NULL,
+                value TEXT NOT NULL,
+                note TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS relationships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relationship_id TEXT NOT NULL UNIQUE,
+                source_entity_id TEXT NOT NULL,
+                target_entity_id TEXT NOT NULL,
+                relationship_type TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                note TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (source_entity_id) REFERENCES entities (entity_id),
+                FOREIGN KEY (target_entity_id) REFERENCES entities (entity_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS timeline_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
+        )
+
+    def _load_entities(self, connection: sqlite3.Connection) -> list[EntityRecord]:
+        return [
+            EntityRecord(
+                entity_id=row["entity_id"],
+                entity_type=row["entity_type"],
+                value=row["value"],
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+            for row in connection.execute(
+                """
+                SELECT entity_id, entity_type, value, note, created_at
+                FROM entities
+                ORDER BY id
+                """
+            ).fetchall()
+        ]
+
+    def _graph_summary(self, connection: sqlite3.Connection) -> GraphSummaryRecord:
+        total_entities = connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        total_relationships = connection.execute("SELECT COUNT(*) FROM relationships").fetchone()[0]
+        type_counts = {
+            row["entity_type"]: row["count"]
+            for row in connection.execute(
+                """
+                SELECT entity_type, COUNT(*) AS count
+                FROM entities
+                GROUP BY entity_type
+                ORDER BY entity_type
+                """
+            ).fetchall()
+        }
+        most_connected = [
+            ConnectedEntityRecord(
+                entity_id=row["entity_id"],
+                entity_type=row["entity_type"],
+                value=row["value"],
+                connection_count=row["connection_count"],
+            )
+            for row in connection.execute(
+                """
+                SELECT e.entity_id, e.entity_type, e.value, COUNT(r.relationship_id) AS connection_count
+                FROM entities e
+                LEFT JOIN relationships r
+                    ON r.source_entity_id = e.entity_id
+                    OR r.target_entity_id = e.entity_id
+                GROUP BY e.entity_id, e.entity_type, e.value
+                HAVING connection_count > 0
+                ORDER BY connection_count DESC, e.value
+                LIMIT 5
+                """
+            ).fetchall()
+        ]
+        return GraphSummaryRecord(
+            total_entities=total_entities,
+            total_relationships=total_relationships,
+            entity_type_counts=type_counts,
+            most_connected=most_connected,
+        )
+
+    def _require_entity(self, connection: sqlite3.Connection, entity_id: str) -> None:
+        row = connection.execute(
+            "SELECT entity_id FROM entities WHERE entity_id = ?",
+            (entity_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Entity not found: {entity_id}")
+
+    def _insert_timeline_event(
+        self,
+        connection: sqlite3.Connection,
+        event_type: str,
+        summary: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO timeline_events (event_type, summary, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (event_type, summary, utc_now_iso()),
         )
