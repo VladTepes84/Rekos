@@ -398,6 +398,15 @@ def test_wmn_adapter_parses_mocked_hit() -> None:
     ]
 
 
+def test_wmn_source_list_contains_instagram_template() -> None:
+    source_list = json.loads(Path("rekos/adapters/wmn_sources.json").read_text(encoding="utf-8"))
+
+    assert {
+        "platform": "Instagram",
+        "url_template": "https://www.instagram.com/{username}/",
+    } in source_list
+
+
 def test_sources_run_wmn_username_creates_profile_finding(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -2120,6 +2129,128 @@ def test_ambiguous_wmn_response_stays_low_or_medium(
 
     assert scores
     assert all(quality_label(score) in {"low", "medium"} for score in scores)
+
+
+def test_ambiguous_instagram_response_does_not_create_high_confidence(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        status = 302 if "instagram.com" in request.full_url else 404
+        return FakeHttpResponse(status, b"")
+
+    monkeypatch.setattr("rekos.adapters.wmn.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-instagram-ambiguous"]) == 0
+    assert main(["sources", "run", "case-instagram-ambiguous", "wmn_username", "alice"]) == 0
+
+    case_folder = tmp_path / "rekos_cases" / "case-instagram-ambiguous"
+    source_output = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (case_folder / "exports" / "sources").glob("*wmn_username-alice.txt")
+    )
+    assert "https://www.instagram.com/alice/" in source_output
+    assert "ambiguous Instagram redirect" in source_output
+
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT confidence, quality_score
+            FROM normalized_findings
+            WHERE value = 'https://www.instagram.com/alice/'
+            """
+        ).fetchall()
+
+    assert rows == []
+    capsys.readouterr()
+
+
+def test_blocked_or_rate_limited_instagram_response_is_not_high(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        status = 429 if "instagram.com" in request.full_url else 404
+        return FakeHttpResponse(status, b"")
+
+    monkeypatch.setattr("rekos.adapters.wmn.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-instagram-blocked"]) == 0
+    assert main(["sources", "run", "case-instagram-blocked", "wmn_username", "alice"]) == 0
+
+    case_folder = tmp_path / "rekos_cases" / "case-instagram-blocked"
+    source_output = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (case_folder / "exports" / "sources").glob("*wmn_username-alice.txt")
+    )
+    assert "Instagram blocked or rate-limited passive request" in source_output
+
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT confidence, quality_score
+            FROM normalized_findings
+            WHERE value = 'https://www.instagram.com/alice/'
+            """
+        ).fetchall()
+
+    assert rows == []
+    capsys.readouterr()
+
+
+def test_cross_source_instagram_confirmation_boosts_score(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-instagram-confirmed"]) == 0
+
+    store = CaseStore()
+    profile_url = "https://www.instagram.com/alice/"
+    store.add_adapter_results(
+        "case-instagram-confirmed",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url=profile_url,
+                platform="instagram",
+                confidence="high",
+                raw_reference=profile_url,
+            ),
+            AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url=profile_url,
+                platform="instagram",
+                confidence="low",
+                raw_reference=(
+                    "HTTP status: 200; warning: Instagram HTTP 200 template hit; "
+                    "low confidence unless cross-source confirmed"
+                ),
+            ),
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["score", "case-instagram-confirmed"]) == 0
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-instagram-confirmed" / "rekos.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT source, quality_score, quality_reason
+            FROM normalized_findings
+            WHERE value = ?
+            ORDER BY source
+            """,
+            (profile_url,),
+        ).fetchall()
+
+    assert {row[0] for row in rows} == {"sherlock_username", "wmn_username"}
+    assert all(quality_label(row[1]) == "high" for row in rows)
+    assert all("same URL confirmed by 2 source(s)" in row[2] for row in rows)
+    assert all("does not claim identity ownership" in row[2] for row in rows)
 
 
 def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(

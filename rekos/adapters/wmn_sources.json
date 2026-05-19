@@ -4,6 +4,10 @@
     "url_template": "https://github.com/{username}"
   },
   {
+    "platform": "Instagram",
+    "url_template": "https://www.instagram.com/{username}/"
+  },
+  {
     "platform": "Reddit",
     "url_template": "https://www.reddit.com/user/{username}"
   },

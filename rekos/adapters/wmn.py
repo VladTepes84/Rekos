@@ -58,7 +58,8 @@ class WmnUsernameAdapter(BaseSourceAdapter):
                     "platform": source.platform,
                     "url": url,
                     "status_code": status_code,
-                    "hit": _is_hit(status_code),
+                    "hit": _is_hit(source.platform, status_code),
+                    "warning": _status_warning(source.platform, status_code),
                     "error": error,
                 }
             )
@@ -93,8 +94,8 @@ class WmnUsernameAdapter(BaseSourceAdapter):
                     target=str(parsed.get("target") or target),
                     url=url,
                     platform=platform,
-                    confidence="medium",
-                    raw_reference=f"HTTP status: {item.get('status_code', 'unknown')}",
+                    confidence=_confidence_for_result(platform, item),
+                    raw_reference=_raw_reference(item),
                 )
             )
         return results
@@ -111,8 +112,42 @@ def _load_sources() -> list[WmnSource]:
     ]
 
 
-def _is_hit(status_code: int | None) -> bool:
-    return status_code is not None and 200 <= status_code < 400
+def _is_hit(platform: str, status_code: int | None) -> bool:
+    if status_code is None:
+        return False
+    normalized_platform = platform.strip().lower()
+    if normalized_platform == "instagram":
+        return status_code == 200
+    return 200 <= status_code < 400
+
+
+def _status_warning(platform: str, status_code: int | None) -> str:
+    normalized_platform = platform.strip().lower()
+    if normalized_platform != "instagram":
+        return ""
+    if status_code in {301, 302, 303, 307, 308}:
+        return "ambiguous Instagram redirect; not strong profile confirmation"
+    if status_code in {401, 403, 429}:
+        return "Instagram blocked or rate-limited passive request"
+    if status_code is None:
+        return "Instagram request did not return an HTTP status"
+    if status_code != 200:
+        return "Instagram response did not clearly confirm profile existence"
+    return "Instagram HTTP 200 template hit; low confidence unless cross-source confirmed"
+
+
+def _confidence_for_result(platform: str, item: dict[str, object]) -> str:
+    if platform.strip().lower() == "instagram":
+        return "low"
+    return "medium"
+
+
+def _raw_reference(item: dict[str, object]) -> str:
+    status = item.get("status_code", "unknown")
+    warning = str(item.get("warning") or "").strip()
+    if warning:
+        return f"HTTP status: {status}; warning: {warning}"
+    return f"HTTP status: {status}"
 
 
 def _is_http_url(value: str) -> bool:
