@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
+from urllib.parse import urlparse
 
 from .errors import CaseExistsError, CaseNotFoundError
 from .hashfile import sha256_file
@@ -54,6 +55,14 @@ ALLOWED_RELATIONSHIP_TYPES = {
 ALLOWED_CONFIDENCES = {"low", "medium", "high"}
 SEARCH_TYPES = {"entity", "finding", "evidence", "timeline", "note", "relationship"}
 TARGET_LIKE_ENTITY_TYPES = {"username", "email", "domain", "url", "ip", "phone"}
+TRUSTED_FINDING_SOURCES = {
+    "rdap_domain",
+    "crtsh_domain",
+    "wayback_url",
+    "http_snapshot",
+    "metadata",
+    "snapshot_url",
+}
 ALLOWED_FINDING_TYPES = {
     "discovered_profile",
     "discovered_domain",
@@ -74,10 +83,29 @@ class _FindingInput:
     raw_reference: str
 
 
+@dataclass(frozen=True)
+class _ScoreContext:
+    targets: set[str]
+    usernames: set[str]
+    source_runs: dict[str, int]
+    source_errors: dict[str, int]
+    value_sources: dict[str, set[str]]
+    evidence_values: set[str]
+    relationship_counts: dict[str, int]
+
+
 def utc_now_iso() -> str:
     """Return a compact UTC timestamp suitable for SQLite text storage."""
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def quality_label(score: int) -> str:
+    if score >= 75:
+        return "high"
+    if score >= 45:
+        return "medium"
+    return "low"
 
 
 class CaseStore:
@@ -675,6 +703,29 @@ class CaseStore:
         with self.connection_for_case(case) as connection:
             return self._load_findings(connection)
 
+    def score_findings(self, case: str) -> list[FindingRecord]:
+        with self.connection_for_case(case) as connection:
+            findings = self._load_findings(connection)
+            context = _score_context(connection)
+            updates: list[tuple[int, str, str]] = []
+            for finding in findings:
+                score, reason = _score_finding(finding, context)
+                updates.append((score, reason, finding.finding_id))
+            connection.executemany(
+                """
+                UPDATE normalized_findings
+                SET quality_score = ?, quality_reason = ?
+                WHERE finding_id = ?
+                """,
+                updates,
+            )
+            self._insert_timeline_event(
+                connection,
+                "findings.scored",
+                f"Scored {len(updates)} normalized findings for correlation quality",
+            )
+            return self._load_findings(connection)
+
     def search(
         self,
         case: str,
@@ -1237,6 +1288,8 @@ class CaseStore:
                 value TEXT NOT NULL,
                 source TEXT NOT NULL,
                 confidence TEXT NOT NULL,
+                quality_score INTEGER NOT NULL DEFAULT 0,
+                quality_reason TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 raw_reference TEXT NOT NULL,
                 UNIQUE(type, value, source)
@@ -1273,6 +1326,18 @@ class CaseStore:
                 FOREIGN KEY (evidence_id) REFERENCES evidence (evidence_id)
             );
             """
+        )
+        _ensure_column(
+            connection,
+            "normalized_findings",
+            "quality_score",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
+            "normalized_findings",
+            "quality_reason",
+            "TEXT NOT NULL DEFAULT ''",
         )
 
     def _load_entities(self, connection: sqlite3.Connection) -> list[EntityRecord]:
@@ -1381,12 +1446,15 @@ class CaseStore:
                 value=row["value"],
                 source=row["source"],
                 confidence=row["confidence"],
+                quality_score=row["quality_score"],
+                quality_reason=row["quality_reason"],
                 created_at=row["created_at"],
                 raw_reference=row["raw_reference"],
             )
             for row in connection.execute(
                 """
                 SELECT finding_id, type, value, source, confidence,
+                       quality_score, quality_reason,
                        created_at, raw_reference
                 FROM normalized_findings
                 ORDER BY id
@@ -1557,6 +1625,8 @@ class CaseStore:
                 finding.value,
                 finding.source,
                 _normalize_confidence(finding.confidence),
+                0,
+                "",
                 created_at,
                 finding.raw_reference,
             )
@@ -1573,10 +1643,12 @@ class CaseStore:
                 value,
                 source,
                 confidence,
+                quality_score,
+                quality_reason,
                 created_at,
                 raw_reference
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -1790,6 +1862,210 @@ def _record_matches_filters(
     if confidence and result.confidence.lower() != confidence:
         return False
     return True
+
+
+def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
+    targets = {
+        row["value"].strip().lower()
+        for row in connection.execute("SELECT value FROM targets").fetchall()
+        if row["value"]
+    }
+    targets.update(
+        row["target"].strip().lower()
+        for row in connection.execute("SELECT target FROM source_investigations").fetchall()
+        if row["target"]
+    )
+    targets.update(
+        row["target"].strip().lower()
+        for row in connection.execute("SELECT DISTINCT target FROM adapter_results").fetchall()
+        if row["target"]
+    )
+    targets.update(
+        row["username"].strip().lower()
+        for row in connection.execute("SELECT username FROM investigations").fetchall()
+        if row["username"]
+    )
+
+    usernames = {
+        row["value"].strip()
+        for row in connection.execute(
+            "SELECT value FROM entities WHERE entity_type = 'username'"
+        ).fetchall()
+        if row["value"]
+    }
+    usernames.update(
+        row["username"].strip()
+        for row in connection.execute("SELECT username FROM investigations").fetchall()
+        if row["username"]
+    )
+    usernames.update(
+        row["value"].strip()
+        for row in connection.execute(
+            "SELECT value FROM targets WHERE target_type = 'username'"
+        ).fetchall()
+        if row["value"]
+    )
+
+    source_runs = {
+        row["source"]: row["count"]
+        for row in connection.execute(
+            """
+            SELECT source, COUNT(*) AS count
+            FROM adapter_results
+            GROUP BY source
+            """
+        ).fetchall()
+    }
+    source_errors = {
+        row["source"]: row["count"]
+        for row in connection.execute(
+            """
+            SELECT source, COUNT(*) AS count
+            FROM source_investigation_errors
+            GROUP BY source
+            """
+        ).fetchall()
+    }
+    value_sources: dict[str, set[str]] = {}
+    for row in connection.execute(
+        "SELECT value, source FROM normalized_findings"
+    ).fetchall():
+        value_sources.setdefault(row["value"].strip().lower(), set()).add(row["source"])
+
+    evidence_values: set[str] = set()
+    for row in connection.execute(
+        "SELECT path, source_url FROM evidence"
+    ).fetchall():
+        if row["path"]:
+            evidence_values.add(row["path"].strip().lower())
+        if row["source_url"]:
+            evidence_values.add(row["source_url"].strip().lower())
+
+    relationship_counts = {
+        row["value"].strip().lower(): row["connection_count"]
+        for row in connection.execute(
+            """
+            SELECT e.value, COUNT(r.relationship_id) AS connection_count
+            FROM entities e
+            JOIN relationships r
+                ON r.source_entity_id = e.entity_id
+                OR r.target_entity_id = e.entity_id
+            GROUP BY e.entity_id, e.value
+            """
+        ).fetchall()
+    }
+    return _ScoreContext(
+        targets=targets,
+        usernames=usernames,
+        source_runs=source_runs,
+        source_errors=source_errors,
+        value_sources=value_sources,
+        evidence_values=evidence_values,
+        relationship_counts=relationship_counts,
+    )
+
+
+def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int, str]:
+    value_key = finding.value.strip().lower()
+    raw_key = finding.raw_reference.strip().lower()
+    score = 20
+    reasons = ["correlation quality only; does not claim identity ownership"]
+
+    confidence_points = {"high": 20, "medium": 12, "low": 4}.get(finding.confidence, 8)
+    score += confidence_points
+    reasons.append(f"{finding.confidence} source confidence")
+
+    if value_key in context.targets:
+        score += 20
+        reasons.append("exact target match")
+
+    normalized_usernames = {_normalize_username(username) for username in context.usernames}
+    weak_usernames = {_compact_username(username) for username in context.usernames}
+    profile_username = _username_from_profile_url(finding.value)
+    if profile_username:
+        normalized_profile = _normalize_username(profile_username)
+        compact_profile = _compact_username(profile_username)
+        if normalized_profile in normalized_usernames:
+            score += 15
+            reasons.append("normalized username match")
+        elif compact_profile in weak_usernames:
+            score += 6
+            reasons.append("weak username variant match")
+    elif finding.confidence == "low":
+        score += 3
+        reasons.append("weak variant-derived finding")
+
+    if finding.source in TRUSTED_FINDING_SOURCES:
+        score += 15
+        reasons.append("trusted passive source type")
+
+    duplicate_sources = context.value_sources.get(value_key, set())
+    if len(duplicate_sources) > 1:
+        score += 15
+        reasons.append("duplicate confirmation across sources")
+
+    source_run_count = context.source_runs.get(finding.source, 0)
+    source_error_count = context.source_errors.get(finding.source, 0)
+    total_source_events = source_run_count + source_error_count
+    if total_source_events:
+        error_rate = source_error_count / total_source_events
+        if error_rate == 0:
+            score += 5
+            reasons.append("no recorded source errors")
+        elif error_rate <= 0.25:
+            score += 2
+            reasons.append("low source error rate")
+        elif error_rate >= 0.5:
+            score -= 10
+            reasons.append("high source error rate")
+        else:
+            score -= 4
+            reasons.append("moderate source error rate")
+
+    if value_key in context.evidence_values or raw_key in context.evidence_values:
+        score += 10
+        reasons.append("local evidence artifact present")
+
+    relationship_count = context.relationship_counts.get(value_key, 0)
+    if relationship_count:
+        score += min(10, relationship_count * 2)
+        reasons.append(f"{relationship_count} graph relationship(s)")
+
+    bounded_score = max(0, min(100, score))
+    reasons.append(f"{quality_label(bounded_score)} quality label")
+    return bounded_score, "; ".join(reasons)
+
+
+def _normalize_username(username: str) -> str:
+    return username.strip().lower().lstrip("@")
+
+
+def _compact_username(username: str) -> str:
+    return "".join(char for char in _normalize_username(username) if char.isalnum())
+
+
+def _username_from_profile_url(value: str) -> str:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return ""
+    return parts[-1]
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _variant_confidence(variant: UsernameVariant) -> str:

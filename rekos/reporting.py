@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .errors import UnsupportedReportFormatError
 from .models import CaseSnapshot
+from .storage import quality_label
 
 
 def render_report(snapshot: CaseSnapshot, report_format: str) -> str:
@@ -139,6 +140,8 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
                 [
                     f"- `{finding.finding_type}`: {finding.value}",
                     f"  - Confidence: {finding.confidence}",
+                    f"  - Quality: {finding.quality_score} ({quality_label(finding.quality_score)})",
+                    f"  - Quality reason: {finding.quality_reason or 'Not scored yet'}",
                     f"  - Source: {finding.source}",
                     f"  - UUID: `{finding.finding_id}`",
                     f"  - Added: {finding.created_at}",

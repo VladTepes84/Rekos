@@ -12,6 +12,7 @@ from rich.table import Table
 
 from .adapters.registry import default_registry
 from .errors import RekosError
+from .exporting import export_case
 from .hashfile import sha256_file
 from .investigation import investigate_domain, investigate_url, investigate_username
 from .osint import collect_metadata, scan_username
@@ -21,6 +22,7 @@ from .storage import (
     ALLOWED_ENTITY_TYPES,
     ALLOWED_RELATIONSHIP_TYPES,
     CaseStore,
+    quality_label,
 )
 from .usernames import username_variants
 
@@ -30,7 +32,10 @@ error_console = Console(stderr=True, width=240)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rekos", description="Local defensive case-management CLI")
+    parser = argparse.ArgumentParser(
+        prog="rekos",
+        description="Terminal-native passive OSINT CLI",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     new_case = subparsers.add_parser("new-case", help="Create a new local case")
@@ -123,6 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
     findings = subparsers.add_parser("findings", help="List normalized findings")
     findings.add_argument("case")
 
+    score = subparsers.add_parser("score", help="Score normalized findings")
+    score.add_argument("case")
+
     snapshot_url_parser = subparsers.add_parser("snapshot-url", help="Capture a public URL snapshot")
     snapshot_url_parser.add_argument("case")
     snapshot_url_parser.add_argument("url")
@@ -145,6 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_note = subparsers.add_parser("add-note", help="Add a note to a case")
     add_note.add_argument("case")
     add_note.add_argument("text")
+
+    export_case_parser = subparsers.add_parser("export-case", help="Export a case ZIP archive")
+    export_case_parser.add_argument("case")
+    export_case_parser.add_argument("--output", required=True)
 
     report = subparsers.add_parser("report", help="Render a case report")
     report.add_argument("case")
@@ -386,7 +398,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             for finding in findings[-10:]:
                 console.print(
                     f"- {finding.finding_type}: {finding.value} "
-                    f"({finding.confidence}) from {finding.source}"
+                    f"({finding.confidence}) from {finding.source}; "
+                    f"quality {finding.quality_score}/{quality_label(finding.quality_score)}"
                 )
             timeline = store.snapshot(args.case).timeline
             console.print(f"Timeline events: {len(timeline)}")
@@ -402,8 +415,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             for finding in findings:
                 console.print(
                     f"{finding.finding_id} {finding.finding_type}: {finding.value} "
-                    f"({finding.confidence}) from {finding.source}"
+                    f"({finding.confidence}) from {finding.source}; "
+                    f"quality {finding.quality_score}/{quality_label(finding.quality_score)}"
                 )
+                if finding.quality_reason:
+                    console.print(f"  Reason: {finding.quality_reason}")
+            return 0
+
+        if args.command == "score":
+            findings = store.score_findings(args.case)
+            if not findings:
+                console.print("No findings to score")
+                return 0
+            table = Table(title="Finding Scores")
+            table.add_column("Type")
+            table.add_column("Value")
+            table.add_column("Source")
+            table.add_column("Score")
+            table.add_column("Label")
+            table.add_column("Reason")
+            for finding in findings:
+                table.add_row(
+                    finding.finding_type,
+                    finding.value,
+                    finding.source,
+                    str(finding.quality_score),
+                    quality_label(finding.quality_score),
+                    finding.quality_reason,
+                )
+            console.print(table)
             return 0
 
         if args.command == "snapshot-url":
@@ -470,6 +510,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "add-note":
             note = store.add_note(args.case, args.text)
             console.print(f"[green]Added note[/green] ({note.added_at})")
+            return 0
+
+        if args.command == "export-case":
+            output_path = export_case(args.case, Path(args.output), store)
+            console.print(f"[green]Exported case[/green] {args.case}")
+            console.print(f"Archive: {output_path}")
             return 0
 
         if args.command == "report":

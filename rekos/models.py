@@ -131,6 +131,8 @@ class FindingRecord:
     value: str
     source: str
     confidence: str
+    quality_score: int
+    quality_reason: str
     created_at: str
     raw_reference: str
 

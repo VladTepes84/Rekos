@@ -4,6 +4,7 @@ import argparse
 import json
 import sqlite3
 import uuid
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from rekos.adapters import (
 from rekos.adapters.registry import default_registry
 from rekos.cli import build_parser, main
 from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
+from rekos.storage import CaseStore
 from rekos.usernames import username_variants
 
 
@@ -116,6 +118,25 @@ def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, c
     assert note_count == 1
 
 
+def test_export_case_creates_zip_with_manifest(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    archive = tmp_path / "case-export.zip"
+
+    assert main(["new-case", "case-export"]) == 0
+    assert main(["add-note", "case-export", "export note"]) == 0
+    assert main(["export-case", "case-export", "--output", str(archive)]) == 0
+
+    output = capsys.readouterr().out
+    assert "Exported case" in output
+    assert archive.exists()
+    with zipfile.ZipFile(archive) as exported:
+        names = set(exported.namelist())
+
+    assert "case-export/rekos.db" in names
+    assert "case-export/manifest.json" in names
+    assert "case-export/manifest.sha256" in names
+
+
 def test_passive_osint_commands_are_registered() -> None:
     parser = build_parser()
     subparser_action = next(
@@ -136,11 +157,13 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "investigate" in subcommands
     assert "show-investigation" in subcommands
     assert "findings" in subcommands
+    assert "score" in subcommands
     assert "snapshot-url" in subcommands
     assert "snapshot-investigation" in subcommands
     assert "search" in subcommands
     assert "list-targets" in subcommands
     assert "list-sources" in subcommands
+    assert "export-case" in subcommands
     assert "sources" in subcommands
 
 
@@ -1429,6 +1452,98 @@ def test_findings_deduplicate_repeated_source_results(
     ]
 
 
+def test_score_calculates_quality_and_labels(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-score"]) == 0
+    assert main(["add-target", "case-score", "--type", "username", "--value", "alice"]) == 0
+
+    store = CaseStore()
+    profile_url = "https://profiles.example/alice"
+    store.add_adapter_results(
+        "case-score",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url=profile_url,
+                platform="profiles",
+                confidence="high",
+                raw_reference=profile_url,
+            ),
+            AdapterResult(
+                source="maigret",
+                target="alice",
+                url=profile_url,
+                platform="profiles",
+                confidence="medium",
+                raw_reference=profile_url,
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://profiles.example/bob",
+                platform="profiles",
+                confidence="low",
+                raw_reference="https://profiles.example/bob",
+            ),
+        ],
+    )
+    exports = store.exports_folder("case-score")
+    body_path = exports / "score-body.html"
+    headers_path = exports / "score-headers.json"
+    body_path.write_text("<html>alice</html>", encoding="utf-8")
+    headers_path.write_text("{}", encoding="utf-8")
+    store.add_url_snapshot("case-score", profile_url, 200, headers_path, body_path, None)
+    username_entity = store.ensure_entity("case-score", "username", "alice", "score target")
+    profile_entity = store.ensure_entity("case-score", "url", profile_url, "profile")
+    store.relate_entities(
+        "case-score",
+        username_entity.entity_id,
+        profile_entity.entity_id,
+        "same_target",
+        "medium",
+        "correlation test",
+    )
+    capsys.readouterr()
+
+    assert main(["score", "case-score"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Finding Scores" in output
+    assert "high" in output
+    assert "low" in output
+    db_path = tmp_path / "rekos_cases" / "case-score" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT value, source, quality_score, quality_reason
+            FROM normalized_findings
+            ORDER BY source, value
+            """
+        ).fetchall()
+
+    profile_scores = [
+        row
+        for row in rows
+        if row[0] == profile_url and row[1] in {"sherlock_username", "maigret"}
+    ]
+    weak_score = next(row for row in rows if row[0] == "https://profiles.example/bob")
+    assert all(row[2] >= 75 for row in profile_scores)
+    assert "normalized username match" in profile_scores[0][3]
+    assert "duplicate confirmation across sources" in profile_scores[0][3]
+    assert "local evidence artifact present" in profile_scores[0][3]
+    assert weak_score[2] < 45
+    assert "low quality label" in weak_score[3]
+    assert "does not claim identity ownership" in profile_scores[0][3]
+
+    assert main(["findings", "case-score"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "quality" in findings_output
+    assert "Reason:" in findings_output
+
+
 def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -1603,6 +1718,7 @@ def test_report_renders_findings_section(
 
     assert main(["new-case", "case-findings-report"]) == 0
     assert main(["sources", "run", "case-findings-report", "wayback_url", "example.com"]) == 0
+    assert main(["score", "case-findings-report"]) == 0
     capsys.readouterr()
 
     assert main(["report", "case-findings-report"]) == 0
@@ -1613,6 +1729,8 @@ def test_report_renders_findings_section(
     assert "https://web.archive.org/web/20200101000000" in output
     assert "https://example.com/page" in output
     assert "Confidence: medium" in output
+    assert "Quality:" in output
+    assert "Quality reason:" in output
     assert "Source: wayback_url" in output
 
 

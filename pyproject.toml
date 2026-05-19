@@ -5,9 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rekos"
 version = "0.1.0"
-description = "Local defensive cyber case-management CLI"
+description = "Terminal-native passive OSINT CLI for local-first public-source investigation workspaces"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = ["osint", "passive-osint", "cli", "sqlite", "investigation", "public-source"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet",
+    "Topic :: Utilities",
+]
 dependencies = [
     "rich>=13.0",
 ]
