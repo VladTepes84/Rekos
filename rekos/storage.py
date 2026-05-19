@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .errors import CaseExistsError, CaseNotFoundError
 from .hashfile import sha256_file
@@ -87,6 +87,7 @@ class _FindingInput:
 class _ScoreContext:
     targets: set[str]
     usernames: set[str]
+    adapter_targets: dict[tuple[str, str], set[str]]
     source_runs: dict[str, int]
     source_errors: dict[str, int]
     value_sources: dict[str, set[str]]
@@ -699,26 +700,15 @@ class CaseStore:
             )
         return records
 
-    def findings(self, case: str) -> list[FindingRecord]:
+    def findings(self, case: str, *, refresh_scores: bool = False) -> list[FindingRecord]:
         with self.connection_for_case(case) as connection:
+            if refresh_scores:
+                self._score_findings_in_connection(connection)
             return self._load_findings(connection)
 
     def score_findings(self, case: str) -> list[FindingRecord]:
         with self.connection_for_case(case) as connection:
-            findings = self._load_findings(connection)
-            context = _score_context(connection)
-            updates: list[tuple[int, str, str]] = []
-            for finding in findings:
-                score, reason = _score_finding(finding, context)
-                updates.append((score, reason, finding.finding_id))
-            connection.executemany(
-                """
-                UPDATE normalized_findings
-                SET quality_score = ?, quality_reason = ?
-                WHERE finding_id = ?
-                """,
-                updates,
-            )
+            updates = self._score_findings_in_connection(connection)
             self._insert_timeline_event(
                 connection,
                 "findings.scored",
@@ -1652,6 +1642,24 @@ class CaseStore:
             """,
             rows,
         )
+        self._score_findings_in_connection(connection)
+
+    def _score_findings_in_connection(self, connection: sqlite3.Connection) -> list[tuple[int, str, str]]:
+        findings = self._load_findings(connection)
+        context = _score_context(connection)
+        updates: list[tuple[int, str, str]] = []
+        for finding in findings:
+            score, reason = _score_finding(finding, context)
+            updates.append((score, reason, finding.finding_id))
+        connection.executemany(
+            """
+            UPDATE normalized_findings
+            SET quality_score = ?, quality_reason = ?
+            WHERE finding_id = ?
+            """,
+            updates,
+        )
+        return updates
 
     def _require_entity(self, connection: sqlite3.Connection, entity_id: str) -> None:
         row = connection.execute(
@@ -1906,6 +1914,16 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
         if row["value"]
     )
 
+    adapter_targets: dict[tuple[str, str], set[str]] = {}
+    for row in connection.execute(
+        "SELECT source, url, target FROM adapter_results"
+    ).fetchall():
+        source = row["source"].strip()
+        url = row["url"].strip().lower()
+        target = row["target"].strip()
+        if source and url and target:
+            adapter_targets.setdefault((source, url), set()).add(target)
+
     source_runs = {
         row["source"]: row["count"]
         for row in connection.execute(
@@ -1957,6 +1975,7 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
     return _ScoreContext(
         targets=targets,
         usernames=usernames,
+        adapter_targets=adapter_targets,
         source_runs=source_runs,
         source_errors=source_errors,
         value_sources=value_sources,
@@ -1983,14 +2002,16 @@ def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int,
     weak_usernames = {_compact_username(username) for username in context.usernames}
     profile_username = _username_from_profile_url(finding.value)
     if profile_username:
-        normalized_profile = _normalize_username(profile_username)
-        compact_profile = _compact_username(profile_username)
-        if normalized_profile in normalized_usernames:
-            score += 15
-            reasons.append("normalized username match")
-        elif compact_profile in weak_usernames:
-            score += 6
-            reasons.append("weak username variant match")
+        match_score, match_reason = _profile_username_score(
+            finding,
+            profile_username,
+            context,
+            normalized_usernames,
+            weak_usernames,
+        )
+        if match_score:
+            score += match_score
+            reasons.append(match_reason)
     elif finding.confidence == "low":
         score += 3
         reasons.append("weak variant-derived finding")
@@ -2051,7 +2072,43 @@ def _username_from_profile_url(value: str) -> str:
     parts = [part for part in parsed.path.split("/") if part]
     if not parts:
         return ""
-    return parts[-1]
+    return unquote(parts[-1])
+
+
+def _profile_username_score(
+    finding: FindingRecord,
+    profile_username: str,
+    context: _ScoreContext,
+    normalized_usernames: set[str],
+    weak_usernames: set[str],
+) -> tuple[int, str]:
+    value_key = finding.value.strip().lower()
+    adapter_targets = context.adapter_targets.get((finding.source, value_key), set())
+    exact_candidates = adapter_targets or context.usernames
+    if finding.confidence == "high" and any(
+        _username_exact_key(profile_username) == _username_exact_key(candidate)
+        for candidate in exact_candidates
+    ):
+        return 40, "exact username match in discovered profile URL"
+
+    normalized_profile = _normalize_username(profile_username)
+    normalized_targets = {_normalize_username(target) for target in adapter_targets}
+    if finding.confidence != "low" and (
+        normalized_profile in normalized_targets
+        or normalized_profile in normalized_usernames
+    ):
+        return 28, "normalized username match in discovered profile URL"
+
+    compact_profile = _compact_username(profile_username)
+    weak_targets = {_compact_username(target) for target in adapter_targets}
+    if compact_profile in weak_targets or compact_profile in weak_usernames:
+        return 6, "weak username variant match"
+
+    return 0, ""
+
+
+def _username_exact_key(username: str) -> str:
+    return username.strip().lstrip("@")
 
 
 def _ensure_column(

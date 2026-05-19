@@ -410,7 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "findings":
-            findings = store.findings(args.case)
+            findings = store.findings(args.case, refresh_scores=True)
             if not findings:
                 console.print("No findings recorded")
                 return 0

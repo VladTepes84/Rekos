@@ -20,7 +20,7 @@ from rekos.adapters import (
 from rekos.adapters.registry import default_registry
 from rekos.cli import build_parser, main
 from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
-from rekos.storage import CaseStore
+from rekos.storage import CaseStore, quality_label
 from rekos.usernames import username_variants
 
 
@@ -1689,6 +1689,77 @@ def test_score_calculates_quality_and_labels(
     findings_output = capsys.readouterr().out
     assert "quality" in findings_output
     assert "Reason:" in findings_output
+
+
+def test_discovered_profile_quality_scores_username_match_strength(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-profile-quality"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-profile-quality",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="Alice.Smith",
+                url="https://profiles.example/Alice.Smith",
+                platform="profiles",
+                confidence="high",
+                raw_reference="https://profiles.example/Alice.Smith",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice.smith",
+                url="https://profiles.example/alice.smith",
+                platform="profiles",
+                confidence="medium",
+                raw_reference="https://profiles.example/alice.smith",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="AliceSmith",
+                url="https://profiles.example/AliceSmith",
+                platform="profiles",
+                confidence="low",
+                raw_reference="https://profiles.example/AliceSmith",
+            ),
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["findings", "case-profile-quality"]) == 0
+
+    output = capsys.readouterr().out
+    assert "quality 0/low" not in output
+    assert "quality" in output
+    db_path = tmp_path / "rekos_cases" / "case-profile-quality" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in connection.execute(
+                """
+                SELECT value, quality_score, quality_reason
+                FROM normalized_findings
+                ORDER BY value
+                """
+            ).fetchall()
+        }
+
+    exact_score, exact_reason = rows["https://profiles.example/Alice.Smith"]
+    normalized_score, normalized_reason = rows["https://profiles.example/alice.smith"]
+    weak_score, weak_reason = rows["https://profiles.example/AliceSmith"]
+
+    assert exact_score >= 80
+    assert "exact username match in discovered profile URL" in exact_reason
+    assert "does not claim identity ownership" in exact_reason
+    assert normalized_score >= 60
+    assert quality_label(normalized_score) == "medium"
+    assert "normalized username match in discovered profile URL" in normalized_reason
+    assert weak_score < 45
+    assert quality_label(weak_score) == "low"
+    assert "weak username variant match" in weak_reason
 
 
 def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(
