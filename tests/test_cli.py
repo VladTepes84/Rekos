@@ -980,6 +980,153 @@ def test_investigate_username_missing_sherlock(
     assert "Missing username investigation tool" in captured.err
 
 
+def test_investigate_username_skips_unsafe_double_dot_variant(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    calls: list[str] = []
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        assert ".." not in username
+        calls.append(username)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-unsafe-username"]) == 0
+    assert (
+        main(
+            [
+                "investigate",
+                "username",
+                "case-unsafe-username",
+                "ciccio..gamer035",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "sherlock_username failed for ciccio..gamer035: invalid generated site URL / upstream tool error" in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "LocationParseError" not in captured.out
+    assert "LocationParseError" not in captured.err
+    assert calls == ["cicciogamer035", "ciccio__gamer035"]
+
+    case_folder = tmp_path / "rekos_cases" / "case-unsafe-username"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        username_entities = [
+            row[0]
+            for row in connection.execute(
+                "SELECT value FROM entities WHERE entity_type = 'username' ORDER BY id"
+            ).fetchall()
+        ]
+        adapter_targets = [
+            row[0]
+            for row in connection.execute(
+                "SELECT target FROM adapter_results ORDER BY id"
+            ).fetchall()
+        ]
+        investigation_row = connection.execute(
+            """
+            SELECT target_type, target, source_count, result_count,
+                   skipped_count, failed_count
+            FROM source_investigations
+            """
+        ).fetchone()
+        error_row = connection.execute(
+            "SELECT source, error FROM source_investigation_errors"
+        ).fetchone()
+
+    assert username_entities == [
+        "ciccio..gamer035",
+        "cicciogamer035",
+        "ciccio__gamer035",
+    ]
+    assert adapter_targets == ["cicciogamer035", "ciccio__gamer035"]
+    assert investigation_row == ("username", "ciccio..gamer035", 2, 2, 1, 0)
+    assert error_row == (
+        "sherlock_username",
+        "sherlock_username failed for ciccio..gamer035: invalid generated site URL / upstream tool error",
+    )
+
+    assert main(["show-investigation", "case-unsafe-username"]) == 0
+    show_output = capsys.readouterr().out
+    assert "Username: ciccio..gamer035" in show_output
+    assert "Skipped: 1" in show_output
+    assert "sherlock_username failed for ciccio..gamer035" in show_output
+
+
+def test_investigate_username_captures_sherlock_traceback_without_printing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(MaigretAdapter, "run", _raise_missing_maigret)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        if username == "Alice.Smith":
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "Traceback (most recent call last):\n"
+                    "urllib3.exceptions.LocationParseError: Failed to parse URL\n"
+                ),
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-traceback-username"]) == 0
+    assert main(["investigate", "username", "case-traceback-username", "Alice.Smith"]) == 0
+
+    captured = capsys.readouterr()
+    assert "sherlock_username failed for Alice.Smith: invalid generated site URL / upstream tool error" in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "LocationParseError" not in captured.out
+    assert "LocationParseError" not in captured.err
+
+    case_folder = tmp_path / "rekos_cases" / "case-traceback-username"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        investigation_row = connection.execute(
+            """
+            SELECT target_type, target, source_count, result_count,
+                   skipped_count, failed_count
+            FROM source_investigations
+            """
+        ).fetchone()
+        error_row = connection.execute(
+            "SELECT source, error FROM source_investigation_errors"
+        ).fetchone()
+        profile_count = connection.execute(
+            "SELECT COUNT(*) FROM investigation_profiles"
+        ).fetchone()[0]
+
+    assert investigation_row == ("username", "Alice.Smith", 3, 3, 0, 1)
+    assert error_row == (
+        "sherlock_username",
+        "sherlock_username failed for Alice.Smith: invalid generated site URL / upstream tool error",
+    )
+    assert profile_count == 3
+
+
 def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")

@@ -580,8 +580,8 @@ class CaseStore:
     ) -> SourceInvestigationRecord:
         cleaned_type = target_type.strip().lower()
         cleaned_target = target.strip()
-        if cleaned_type not in {"domain", "url"}:
-            raise ValueError("Source investigation target type must be domain or url.")
+        if cleaned_type not in {"username", "domain", "url"}:
+            raise ValueError("Source investigation target type must be username, domain, or url.")
         if not cleaned_target:
             raise ValueError("Source investigation target cannot be empty.")
 

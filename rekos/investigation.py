@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter
 from .adapters.registry import default_registry
 from .adapters.web_osint import normalize_domain
-from .errors import ExternalToolMissingError, RekosError
+from .errors import ExternalToolExecutionError, ExternalToolMissingError, RekosError
 from .osint import _safe_name, _write_export
 from .snapshots import normalize_public_url
 from .storage import CaseStore
@@ -27,16 +28,17 @@ class ProfileFinding:
 
 
 @dataclass(frozen=True)
+class SourceInvestigationFailure:
+    source: str
+    error: str
+
+
+@dataclass(frozen=True)
 class UsernameInvestigationResult:
     username: str
     variants: list[UsernameVariant]
     profiles: list[ProfileFinding]
-
-
-@dataclass(frozen=True)
-class SourceInvestigationFailure:
-    source: str
-    error: str
+    failures: list[SourceInvestigationFailure]
 
 
 @dataclass(frozen=True)
@@ -61,22 +63,51 @@ def investigate_username(
 
     profiles: list[ProfileFinding] = []
     seen_profiles: set[tuple[str, str]] = set()
+    attempted_runs: set[tuple[str, str]] = set()
+    sources_run = 0
+    skipped_count = 0
+    failed_count = 0
+    failures: list[SourceInvestigationFailure] = []
     for variant in variants:
         for adapter in adapters:
+            run_target = variant.value
+            if adapter.name == "sherlock_username" and not _is_safe_sherlock_username(run_target):
+                skipped_count += 1
+                message = _clean_sherlock_failure_message(adapter.name, run_target)
+                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                store.add_timeline_event(
+                    case,
+                    "source.skipped",
+                    f"Skipped source {adapter.name} for unsafe username variant",
+                )
+                continue
+            if (adapter.name, run_target) in attempted_runs:
+                continue
+            attempted_runs.add((adapter.name, run_target))
             try:
-                raw_output = adapter.run(case, variant.value)
+                raw_output = adapter.run(case, run_target)
             except ExternalToolMissingError:
                 if adapter.name == "sherlock_username":
                     raise
                 continue
+            except ExternalToolExecutionError:
+                failed_count += 1
+                message = _clean_sherlock_failure_message(adapter.name, variant.value)
+                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                store.add_timeline_event(
+                    case,
+                    "source.failed",
+                    f"Source {adapter.name} failed for username variant",
+                )
+                continue
             export_path = _write_export(
                 exports_folder,
-                _export_stem(adapter, variant.value),
+                _export_stem(adapter, run_target),
                 raw_output,
             )
             adapter_results = [
                 _with_confidence(result, profile_confidence(variant))
-                for result in adapter.parse_results(variant.value, raw_output)
+                for result in adapter.parse_results(run_target, raw_output)
             ]
             new_adapter_results: list[AdapterResult] = []
             for result in adapter_results:
@@ -97,6 +128,7 @@ def investigate_username(
                     )
                 )
             store.add_adapter_results(case, new_adapter_results)
+            sources_run += 1
 
     store.add_username_investigation(
         case,
@@ -115,10 +147,21 @@ def investigate_username(
             for profile in profiles
         ],
     )
+    store.add_source_investigation(
+        case,
+        "username",
+        variants[0].value,
+        sources_run,
+        len(profiles),
+        skipped_count,
+        failed_count,
+        [(failure.source, failure.error) for failure in failures],
+    )
     return UsernameInvestigationResult(
         username=variants[0].value,
         variants=variants,
         profiles=profiles,
+        failures=failures,
     )
 
 
@@ -170,6 +213,25 @@ def _export_stem(adapter: BaseSourceAdapter, username: str) -> str:
     if adapter.name in {"sherlock", "sherlock_username"}:
         return f"investigate-username-{safe_username}"
     return f"investigate-{adapter.name}-{safe_username}"
+
+
+_SHERLOCK_SAFE_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+
+
+def _is_safe_sherlock_username(username: str) -> bool:
+    value = username.strip()
+    return (
+        value == username
+        and bool(_SHERLOCK_SAFE_USERNAME_RE.fullmatch(value))
+        and ".." not in value
+        and not value.endswith(".")
+    )
+
+
+def _clean_sherlock_failure_message(source: str, target: str) -> str:
+    if source in {"sherlock", "sherlock_username"}:
+        return f"{source} failed for {target}: invalid generated site URL / upstream tool error"
+    return f"{source} failed for {target}: upstream tool error"
 
 
 def _investigate_sources(

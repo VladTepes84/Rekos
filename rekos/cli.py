@@ -340,6 +340,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             console.print(f"[green]Completed username investigation[/green] {result.username}")
             console.print(f"Variants: {len(result.variants)}")
             console.print(f"Discovered profiles: {len(result.profiles)}")
+            for failure in result.failures:
+                console.print(f"[yellow]Warning:[/yellow] {failure.error}")
             return 0
 
         if args.command == "investigate" and args.investigation_type == "domain":
