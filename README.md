@@ -111,15 +111,15 @@ During `rekos investigate username <case> <username>`, REKOS generates safe user
 
 ## Supported Sources
 
-| Source | Target types | Dependencies | Notes |
-| --- | --- | --- | --- |
-| `sherlock_username` | `username` | `sherlock` binary | Runs Sherlock with safe subprocess arguments and parses public profile URLs. |
-| `maigret_username` | `username` | optional `maigret` package/tool | Runs Maigret when installed; REKOS continues without it. |
-| `wmn_username` | `username` | none | Checks local public profile URL templates with conservative passive HTTP validation. |
-| `http_snapshot` | `url` | none | Captures public HTTP response artifacts and optional Playwright screenshot. |
-| `rdap_domain` | `domain` | none | Uses public HTTPS RDAP lookup and stores raw JSON output. |
-| `crtsh_domain` | `domain` | none | Queries the public crt.sh certificate transparency endpoint. |
-| `wayback_url` | `url`, `domain` | none | Queries public Wayback CDX data and records archive URLs. |
+| Source              | Target types    | Dependencies                     | Notes                                                                           |
+|---------------------|-----------------|----------------------------------|---------------------------------------------------------------------------------|
+| `sherlock_username` | `username`      | `sherlock` binary                | Runs Sherlock with safe subprocess arguments and parses public profile URLs.     |
+| `maigret_username`  | `username`      | optional `maigret` package/tool  | Runs Maigret when installed; REKOS continues without it.                        |
+| `wmn_username`      | `username`      | none                             | Checks local public profile URL templates with conservative passive HTTP validation. |
+| `http_snapshot`     | `url`           | none                             | Captures public HTTP response artifacts and optional Playwright screenshot.      |
+| `rdap_domain`       | `domain`        | none                             | Uses public HTTPS RDAP lookup and stores raw JSON output.                        |
+| `crtsh_domain`      | `domain`        | none                             | Queries the public crt.sh certificate transparency endpoint.                     |
+| `wayback_url`       | `url`, `domain` | none                             | Queries public Wayback CDX data and records archive URLs.                        |
 
 Source utilities:
 
