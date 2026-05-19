@@ -9,15 +9,82 @@ from types import SimpleNamespace
 
 import pytest
 
-from rekos.adapters import BaseSourceAdapter, MaigretAdapter, SherlockAdapter
+from rekos.adapters import (
+    AdapterResult,
+    BaseSourceAdapter,
+    MaigretAdapter,
+    SherlockAdapter,
+    SourceRunResult,
+)
 from rekos.adapters.registry import default_registry
 from rekos.cli import build_parser, main
-from rekos.errors import ExternalToolMissingError
+from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
 from rekos.usernames import username_variants
 
 
 def _raise_missing_maigret(self, case: str, target: str) -> str:
     raise ExternalToolMissingError("Missing username investigation tool: install maigret.")
+
+
+class FakeSourceAdapter:
+    def __init__(
+        self,
+        name: str,
+        *,
+        missing: tuple[str, ...] = (),
+        fail: bool = False,
+    ) -> None:
+        self.name = name
+        self.description = f"Fake {name}"
+        self.supported_target_types = ("domain", "url")
+        self.passive_only = True
+        self.external_dependencies = missing
+        self._missing = missing
+        self._fail = fail
+
+    def missing_dependencies(self) -> list[str]:
+        return list(self._missing)
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        if self._fail:
+            raise ExternalToolExecutionError("temporary source failure")
+        root_type = "url" if target.startswith(("http://", "https://")) else "domain"
+        root = store.ensure_entity(case, root_type, target, f"{self.name} target")
+        url = f"https://{self.name}.example/{target.replace('://', '/')}"
+        related = store.ensure_entity(case, "url", url, f"{self.name} result")
+        store.relate_entities(
+            case,
+            related.entity_id,
+            root.entity_id,
+            "extracted_from",
+            "medium",
+            f"{self.name} mocked result",
+        )
+        result = AdapterResult(
+            source=self.name,
+            target=target,
+            url=url,
+            platform="mocked",
+            confidence="medium",
+            raw_reference=url,
+        )
+        store.add_adapter_results(case, [result])
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {target}")
+        return SourceRunResult(
+            source=self.name,
+            target=target,
+            raw_output=url,
+            results=[result],
+            artifacts=[],
+        )
+
+
+class FakeSourceRegistry:
+    def __init__(self, adapters: dict[str, FakeSourceAdapter]) -> None:
+        self.adapters = adapters
+
+    def get(self, name: str) -> FakeSourceAdapter:
+        return self.adapters[name]
 
 
 def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -68,6 +135,7 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "add-username-target" in subcommands
     assert "investigate" in subcommands
     assert "show-investigation" in subcommands
+    assert "findings" in subcommands
     assert "snapshot-url" in subcommands
     assert "snapshot-investigation" in subcommands
     assert "sources" in subcommands
@@ -593,6 +661,13 @@ def test_investigate_username_with_mocked_sherlock(
             ORDER BY id
             """
         ).fetchall()
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence, raw_reference
+            FROM normalized_findings
+            ORDER BY id
+            """
+        ).fetchall()
         investigation_row = connection.execute(
             "SELECT username, variant_count, profile_count FROM investigations"
         ).fetchone()
@@ -626,6 +701,10 @@ def test_investigate_username_with_mocked_sherlock(
     assert [row[3] for row in adapter_rows] == ["profiles"] * 4
     assert [row[4] for row in adapter_rows] == ["high", "medium", "low", "medium"]
     assert all(row[2] == row[5] for row in adapter_rows)
+    assert [row[0] for row in finding_rows] == ["discovered_profile"] * 4
+    assert [row[2] for row in finding_rows] == ["sherlock_username"] * 4
+    assert [row[3] for row in finding_rows] == ["high", "medium", "low", "medium"]
+    assert all(row[1] == row[4] for row in finding_rows)
     assert all(Path(row[3]).exists() for row in profile_rows)
     assert "investigation.completed" in event_types
 
@@ -694,6 +773,13 @@ def test_investigate_username_runs_maigret_and_deduplicates(
             ORDER BY id
             """
         ).fetchall()
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence
+            FROM normalized_findings
+            ORDER BY id
+            """
+        ).fetchall()
 
     assert profile_rows == [
         ("https://profiles.example/alice", "high"),
@@ -704,6 +790,11 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "high"),
         ("sherlock_username", "alice", "https://shared.example/alice", "shared", "high"),
         ("maigret", "alice", "https://maigret.example/alice", "maigret", "high"),
+    ]
+    assert finding_rows == [
+        ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "high"),
+        ("discovered_profile", "https://shared.example/alice", "sherlock_username", "high"),
+        ("discovered_profile", "https://maigret.example/alice", "maigret", "high"),
     ]
 
 
@@ -749,7 +840,133 @@ def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "https://profiles.example/alice.smith (medium) from alice.smith" in output
     assert "Graph entities: 8" in output
     assert "Graph relationships: 11" in output
+    assert "Findings: 4" in output
+    assert "discovered_profile: https://profiles.example/Alice.Smith" in output
     assert "Timeline events:" in output
+
+
+def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    registry = FakeSourceRegistry(
+        {
+            "rdap_domain": FakeSourceAdapter("rdap_domain"),
+            "crtsh_domain": FakeSourceAdapter("crtsh_domain", fail=True),
+            "wayback_url": FakeSourceAdapter("wayback_url"),
+        }
+    )
+    monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
+
+    assert main(["new-case", "case-domain-investigation"]) == 0
+    assert main(["investigate", "domain", "case-domain-investigation", "Example.COM"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed domain investigation" in output
+    assert "example.com" in output
+    assert "Sources run: 2" in output
+    assert "Results: 2" in output
+    assert "Failed: 1" in output
+    assert "crtsh_domain: temporary source failure" in output
+
+    db_path = tmp_path / "rekos_cases" / "case-domain-investigation" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        investigation_row = connection.execute(
+            """
+            SELECT target_type, target, source_count, result_count,
+                   skipped_count, failed_count
+            FROM source_investigations
+            """
+        ).fetchone()
+        error_row = connection.execute(
+            "SELECT source, error FROM source_investigation_errors"
+        ).fetchone()
+        adapter_sources = [
+            row[0]
+            for row in connection.execute(
+                "SELECT source FROM adapter_results ORDER BY id"
+            ).fetchall()
+        ]
+        entity_values = [
+            row[0]
+            for row in connection.execute(
+                "SELECT value FROM entities ORDER BY id"
+            ).fetchall()
+        ]
+        relationship_count = connection.execute(
+            "SELECT COUNT(*) FROM relationships"
+        ).fetchone()[0]
+
+    assert investigation_row == ("domain", "example.com", 2, 2, 0, 1)
+    assert error_row == ("crtsh_domain", "temporary source failure")
+    assert adapter_sources == ["rdap_domain", "wayback_url"]
+    assert "example.com" in entity_values
+    assert relationship_count == 2
+
+    assert main(["show-investigation", "case-domain-investigation"]) == 0
+    show_output = capsys.readouterr().out
+    assert "Domain: example.com" in show_output
+    assert "Sources run: 2" in show_output
+    assert "Failed: 1" in show_output
+
+
+def test_investigate_url_skips_missing_dependency_and_runs_available_source(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    registry = FakeSourceRegistry(
+        {
+            "http_snapshot": FakeSourceAdapter("http_snapshot", missing=("playwright",)),
+            "wayback_url": FakeSourceAdapter("wayback_url"),
+        }
+    )
+    monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
+
+    assert main(["new-case", "case-url-investigation"]) == 0
+    assert main(
+        [
+            "investigate",
+            "url",
+            "case-url-investigation",
+            "https://profiles.example/alice",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed URL investigation" in output
+    assert "Sources run: 1" in output
+    assert "Results: 1" in output
+    assert "Skipped: 1" in output
+    assert "Failed: 0" in output
+    assert "http_snapshot: Missing dependencies: playwright" in output
+
+    db_path = tmp_path / "rekos_cases" / "case-url-investigation" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        investigation_row = connection.execute(
+            """
+            SELECT target_type, target, source_count, result_count,
+                   skipped_count, failed_count
+            FROM source_investigations
+            """
+        ).fetchone()
+        adapter_source = connection.execute(
+            "SELECT source FROM adapter_results"
+        ).fetchone()[0]
+
+    assert investigation_row == (
+        "url",
+        "https://profiles.example/alice",
+        1,
+        1,
+        1,
+        0,
+    )
+    assert adapter_source == "wayback_url"
+
+    assert main(["show-investigation", "case-url-investigation"]) == 0
+    show_output = capsys.readouterr().out
+    assert "URL: https://profiles.example/alice" in show_output
+    assert "Skipped: 1" in show_output
 
 
 def test_report_renders_investigation_summary(
@@ -940,6 +1157,13 @@ def test_sources_run_crtsh_domain_with_mocked_http(
                 "SELECT url FROM adapter_results ORDER BY id"
             ).fetchall()
         ]
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence
+            FROM normalized_findings
+            ORDER BY id
+            """
+        ).fetchall()
 
     assert ("domain", "example.com") in entities
     assert ("domain", "www.example.com") in entities
@@ -955,6 +1179,22 @@ def test_sources_run_crtsh_domain_with_mocked_http(
         "https://api.example.com",
         "https://mail.example.com",
     ]
+    assert finding_rows == [
+        ("certificate_record", "www.example.com", "crtsh_domain", "high"),
+        ("discovered_domain", "www.example.com", "crtsh_domain", "medium"),
+        ("certificate_record", "api.example.com", "crtsh_domain", "high"),
+        ("discovered_domain", "api.example.com", "crtsh_domain", "medium"),
+        ("certificate_record", "mail.example.com", "crtsh_domain", "high"),
+        ("discovered_domain", "mail.example.com", "crtsh_domain", "medium"),
+    ]
+
+    assert main(["findings", "case-crtsh-source"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "certificate_record: www.example.com" in findings_output
+    assert "(high)" in findings_output
+    assert "discovered_domain: api.example.com" in findings_output
+    assert "(medium)" in findings_output
+    assert "from crtsh_domain" in findings_output
 
 
 def test_sources_run_wayback_url_with_mocked_http(
@@ -998,6 +1238,49 @@ def test_sources_run_wayback_url_with_mocked_http(
     assert ("url", archive_url) in entities
     assert relationship == ("extracted_from", "medium")
     assert adapter_row == ("wayback_url", "example.com", archive_url, "wayback")
+
+
+def test_findings_deduplicate_repeated_source_results(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wayback_payload = [
+        ["timestamp", "original", "statuscode", "mimetype"],
+        ["20200101000000", "https://example.com/page", "200", "text/html"],
+    ]
+
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(200, json.dumps(wayback_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-finding-dedupe"]) == 0
+    assert main(["sources", "run", "case-finding-dedupe", "wayback_url", "example.com"]) == 0
+    assert main(["sources", "run", "case-finding-dedupe", "wayback_url", "example.com"]) == 0
+    capsys.readouterr()
+
+    db_path = tmp_path / "rekos_cases" / "case-finding-dedupe" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        adapter_count = connection.execute(
+            "SELECT COUNT(*) FROM adapter_results"
+        ).fetchone()[0]
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence
+            FROM normalized_findings
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert adapter_count == 2
+    assert finding_rows == [
+        (
+            "archive_record",
+            "https://web.archive.org/web/20200101000000/https://example.com/page",
+            "wayback_url",
+            "medium",
+        )
+    ]
 
 
 def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(
@@ -1156,6 +1439,35 @@ def test_report_renders_snapshot_section(
     assert "HTTP status: 200" in output
     assert "Body:" in output
     assert "Evidence:" in output
+
+
+def test_report_renders_findings_section(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wayback_payload = [
+        ["timestamp", "original", "statuscode", "mimetype"],
+        ["20200101000000", "https://example.com/page", "200", "text/html"],
+    ]
+
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(200, json.dumps(wayback_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-findings-report"]) == 0
+    assert main(["sources", "run", "case-findings-report", "wayback_url", "example.com"]) == 0
+    capsys.readouterr()
+
+    assert main(["report", "case-findings-report"]) == 0
+
+    output = capsys.readouterr().out
+    assert "## Findings" in output
+    assert "`archive_record`:" in output
+    assert "https://web.archive.org/web/20200101000000" in output
+    assert "https://example.com/page" in output
+    assert "Confidence: medium" in output
+    assert "Source: wayback_url" in output
 
 
 def test_metadata_returns_clear_error_when_tools_are_missing(

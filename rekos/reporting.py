@@ -132,6 +132,21 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
     else:
         lines.append("  - None recorded")
 
+    lines.extend(["", "## Findings"])
+    if snapshot.findings:
+        for finding in snapshot.findings:
+            lines.extend(
+                [
+                    f"- `{finding.finding_type}`: {finding.value}",
+                    f"  - Confidence: {finding.confidence}",
+                    f"  - Source: {finding.source}",
+                    f"  - UUID: `{finding.finding_id}`",
+                    f"  - Added: {finding.created_at}",
+                ]
+            )
+    else:
+        lines.append("- None recorded")
+
     lines.extend(["", "## Investigations"])
     if snapshot.investigations:
         for investigation in snapshot.investigations:

@@ -1,4 +1,4 @@
-"""Passive username investigation workflow."""
+"""Passive investigation workflows."""
 
 from __future__ import annotations
 
@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter
-from .errors import ExternalToolMissingError
+from .adapters.registry import default_registry
+from .adapters.web_osint import normalize_domain
+from .errors import ExternalToolMissingError, RekosError
 from .osint import _safe_name, _write_export
+from .snapshots import normalize_public_url
 from .storage import CaseStore
 from .usernames import UsernameVariant, username_variants
 
@@ -28,6 +31,23 @@ class UsernameInvestigationResult:
     username: str
     variants: list[UsernameVariant]
     profiles: list[ProfileFinding]
+
+
+@dataclass(frozen=True)
+class SourceInvestigationFailure:
+    source: str
+    error: str
+
+
+@dataclass(frozen=True)
+class MultiSourceInvestigationResult:
+    target_type: str
+    target: str
+    sources_run: int
+    results: int
+    skipped: int
+    failed: int
+    failures: list[SourceInvestigationFailure]
 
 
 def investigate_username(
@@ -102,6 +122,30 @@ def investigate_username(
     )
 
 
+def investigate_domain(case: str, domain: str, store: CaseStore) -> MultiSourceInvestigationResult:
+    normalized_domain = normalize_domain(domain)
+    return _investigate_sources(
+        case=case,
+        target_type="domain",
+        target=normalized_domain,
+        sources=("rdap_domain", "crtsh_domain", "wayback_url"),
+        entity_type="domain",
+        store=store,
+    )
+
+
+def investigate_url(case: str, url: str, store: CaseStore) -> MultiSourceInvestigationResult:
+    normalized_url = normalize_public_url(url)
+    return _investigate_sources(
+        case=case,
+        target_type="url",
+        target=normalized_url,
+        sources=("http_snapshot", "wayback_url"),
+        entity_type="url",
+        store=store,
+    )
+
+
 def profile_confidence(variant: UsernameVariant) -> str:
     if variant.confidence is None:
         return "high"
@@ -126,3 +170,68 @@ def _export_stem(adapter: BaseSourceAdapter, username: str) -> str:
     if adapter.name in {"sherlock", "sherlock_username"}:
         return f"investigate-username-{safe_username}"
     return f"investigate-{adapter.name}-{safe_username}"
+
+
+def _investigate_sources(
+    *,
+    case: str,
+    target_type: str,
+    target: str,
+    sources: tuple[str, ...],
+    entity_type: str,
+    store: CaseStore,
+) -> MultiSourceInvestigationResult:
+    registry = default_registry()
+    store.ensure_entity(case, entity_type, target, f"{target_type} investigation target")
+    store.add_timeline_event(case, "investigation.started", f"Started {target_type} investigation for {target}")
+
+    sources_run = 0
+    result_count = 0
+    skipped_count = 0
+    failures: list[SourceInvestigationFailure] = []
+    for source_name in sources:
+        try:
+            adapter = registry.get(source_name)
+        except RekosError as exc:
+            skipped_count += 1
+            failures.append(SourceInvestigationFailure(source=source_name, error=str(exc)))
+            store.add_timeline_event(case, "source.skipped", f"Skipped source {source_name}: {exc}")
+            continue
+
+        missing = adapter.missing_dependencies()
+        if missing:
+            skipped_count += 1
+            message = f"Missing dependencies: {', '.join(missing)}"
+            failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+            store.add_timeline_event(case, "source.skipped", f"Skipped source {adapter.name}: {message}")
+            continue
+
+        try:
+            result = adapter.execute(case, target, store)
+        except (OSError, RekosError, ValueError) as exc:
+            failures.append(SourceInvestigationFailure(source=adapter.name, error=str(exc)))
+            store.add_timeline_event(case, "source.failed", f"Source {adapter.name} failed: {exc}")
+            continue
+        sources_run += 1
+        result_count += len(result.results)
+
+    failed_count = len(failures) - skipped_count
+    store.add_source_investigation(
+        case,
+        target_type,
+        target,
+        sources_run,
+        result_count,
+        skipped_count,
+        failed_count,
+        [(failure.source, failure.error) for failure in failures],
+    )
+    return MultiSourceInvestigationResult(
+        target_type=target_type,
+        target=target,
+        sources_run=sources_run,
+        results=result_count,
+        skipped=skipped_count,
+        failed=failed_count,
+        failures=failures,
+    )

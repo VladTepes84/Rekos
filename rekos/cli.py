@@ -12,7 +12,7 @@ from rich.console import Console
 from .adapters.registry import default_registry
 from .errors import RekosError
 from .hashfile import sha256_file
-from .investigation import investigate_username
+from .investigation import investigate_domain, investigate_url, investigate_username
 from .osint import collect_metadata, scan_username
 from .reporting import render_report
 from .snapshots import snapshot_investigation, snapshot_url
@@ -92,9 +92,18 @@ def build_parser() -> argparse.ArgumentParser:
     investigate_username_parser = investigate_subparsers.add_parser("username", help="Investigate a username")
     investigate_username_parser.add_argument("case")
     investigate_username_parser.add_argument("username")
+    investigate_domain_parser = investigate_subparsers.add_parser("domain", help="Investigate a domain")
+    investigate_domain_parser.add_argument("case")
+    investigate_domain_parser.add_argument("domain")
+    investigate_url_parser = investigate_subparsers.add_parser("url", help="Investigate a URL")
+    investigate_url_parser.add_argument("case")
+    investigate_url_parser.add_argument("url")
 
     show_investigation = subparsers.add_parser("show-investigation", help="Show investigation results")
     show_investigation.add_argument("case")
+
+    findings = subparsers.add_parser("findings", help="List normalized findings")
+    findings.add_argument("case")
 
     snapshot_url_parser = subparsers.add_parser("snapshot-url", help="Capture a public URL snapshot")
     snapshot_url_parser.add_argument("case")
@@ -241,9 +250,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             console.print(f"Discovered profiles: {len(result.profiles)}")
             return 0
 
+        if args.command == "investigate" and args.investigation_type == "domain":
+            result = investigate_domain(args.case, args.domain, store)
+            console.print(f"[green]Completed domain investigation[/green] {result.target}")
+            console.print(f"Sources run: {result.sources_run}")
+            console.print(f"Results: {result.results}")
+            console.print(f"Skipped: {result.skipped}")
+            console.print(f"Failed: {result.failed}")
+            for failure in result.failures:
+                console.print(f"- {failure.source}: {failure.error}")
+            return 0
+
+        if args.command == "investigate" and args.investigation_type == "url":
+            result = investigate_url(args.case, args.url, store)
+            console.print(f"[green]Completed URL investigation[/green] {result.target}")
+            console.print(f"Sources run: {result.sources_run}")
+            console.print(f"Results: {result.results}")
+            console.print(f"Skipped: {result.skipped}")
+            console.print(f"Failed: {result.failed}")
+            for failure in result.failures:
+                console.print(f"- {failure.source}: {failure.error}")
+            return 0
+
         if args.command == "show-investigation":
             investigations = store.investigations(args.case)
-            if not investigations:
+            source_investigations = store.source_investigations(args.case)
+            if not investigations and not source_investigations:
                 console.print("No investigations recorded")
             for investigation in investigations:
                 console.print(f"Username: {investigation.username}")
@@ -257,13 +289,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                 else:
                     console.print("- No profiles discovered")
+            for investigation in source_investigations:
+                label = "URL" if investigation.target_type == "url" else investigation.target_type.title()
+                console.print(f"{label}: {investigation.target}")
+                console.print(f"Sources run: {investigation.source_count}")
+                console.print(f"Results: {investigation.result_count}")
+                console.print(f"Skipped: {investigation.skipped_count}")
+                console.print(f"Failed: {investigation.failed_count}")
+                for error in investigation.errors:
+                    console.print(f"- {error.source}: {error.error}")
             summary = store.graph_summary(args.case)
             console.print(f"Graph entities: {summary.total_entities}")
             console.print(f"Graph relationships: {summary.total_relationships}")
+            findings = store.findings(args.case)
+            console.print(f"Findings: {len(findings)}")
+            for finding in findings[-10:]:
+                console.print(
+                    f"- {finding.finding_type}: {finding.value} "
+                    f"({finding.confidence}) from {finding.source}"
+                )
             timeline = store.snapshot(args.case).timeline
             console.print(f"Timeline events: {len(timeline)}")
             for event in timeline[-5:]:
                 console.print(f"- {event.event_type}: {event.summary}")
+            return 0
+
+        if args.command == "findings":
+            findings = store.findings(args.case)
+            if not findings:
+                console.print("No findings recorded")
+                return 0
+            for finding in findings:
+                console.print(
+                    f"{finding.finding_id} {finding.finding_type}: {finding.value} "
+                    f"({finding.confidence}) from {finding.source}"
+                )
             return 0
 
         if args.command == "snapshot-url":

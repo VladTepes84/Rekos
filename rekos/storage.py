@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -19,6 +20,7 @@ from .models import (
     ConnectedEntityRecord,
     EntityRecord,
     EvidenceRecord,
+    FindingRecord,
     FileHashRecord,
     GraphSummaryRecord,
     InvestigationProfileRecord,
@@ -27,6 +29,8 @@ from .models import (
     NoteRecord,
     RelationshipRecord,
     SnapshotRecord,
+    SourceInvestigationErrorRecord,
+    SourceInvestigationRecord,
     TargetRecord,
     TimelineEventRecord,
     UsernameScanRecord,
@@ -46,6 +50,24 @@ ALLOWED_RELATIONSHIP_TYPES = {
     "discovered_from",
 }
 ALLOWED_CONFIDENCES = {"low", "medium", "high"}
+ALLOWED_FINDING_TYPES = {
+    "discovered_profile",
+    "discovered_domain",
+    "discovered_url",
+    "metadata_record",
+    "archive_record",
+    "registration_record",
+    "certificate_record",
+}
+
+
+@dataclass(frozen=True)
+class _FindingInput:
+    finding_type: str
+    value: str
+    source: str
+    confidence: str
+    raw_reference: str
 
 
 def utc_now_iso() -> str:
@@ -134,6 +156,18 @@ class CaseStore:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (record.path, record.tools, record.raw_output, record.export_path, record.added_at),
+            )
+            self._insert_findings(
+                connection,
+                [
+                    _FindingInput(
+                        finding_type="metadata_record",
+                        value=record.path,
+                        source="metadata",
+                        confidence="high",
+                        raw_reference=record.export_path,
+                    )
+                ],
             )
         return record
 
@@ -501,6 +535,89 @@ class CaseStore:
         with self.connection_for_case(case) as connection:
             return self._load_investigations(connection)
 
+    def add_source_investigation(
+        self,
+        case: str,
+        target_type: str,
+        target: str,
+        source_count: int,
+        result_count: int,
+        skipped_count: int,
+        failed_count: int,
+        errors: list[tuple[str, str]],
+    ) -> SourceInvestigationRecord:
+        cleaned_type = target_type.strip().lower()
+        cleaned_target = target.strip()
+        if cleaned_type not in {"domain", "url"}:
+            raise ValueError("Source investigation target type must be domain or url.")
+        if not cleaned_target:
+            raise ValueError("Source investigation target cannot be empty.")
+
+        created_at = utc_now_iso()
+        error_records = [
+            SourceInvestigationErrorRecord(source=source, error=error)
+            for source, error in errors
+        ]
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO source_investigations (
+                    target_type,
+                    target,
+                    source_count,
+                    result_count,
+                    skipped_count,
+                    failed_count,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cleaned_type,
+                    cleaned_target,
+                    source_count,
+                    result_count,
+                    skipped_count,
+                    failed_count,
+                    created_at,
+                ),
+            )
+            investigation_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+            connection.executemany(
+                """
+                INSERT INTO source_investigation_errors (
+                    investigation_id,
+                    source,
+                    error
+                )
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (investigation_id, error.source, error.error)
+                    for error in error_records
+                ],
+            )
+            self._insert_timeline_event(
+                connection,
+                "investigation.completed",
+                f"Completed {cleaned_type} investigation for {cleaned_target}",
+            )
+
+        return SourceInvestigationRecord(
+            target_type=cleaned_type,
+            target=cleaned_target,
+            source_count=source_count,
+            result_count=result_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            created_at=created_at,
+            errors=error_records,
+        )
+
+    def source_investigations(self, case: str) -> list[SourceInvestigationRecord]:
+        with self.connection_for_case(case) as connection:
+            return self._load_source_investigations(connection)
+
     def add_adapter_results(self, case: str, results: list[AdapterResult]) -> list[AdapterResultRecord]:
         created_at = utc_now_iso()
         records = [
@@ -544,7 +661,15 @@ class CaseStore:
                     for record in records
                 ],
             )
+            self._insert_findings(
+                connection,
+                _findings_from_adapter_results(results),
+            )
         return records
+
+    def findings(self, case: str) -> list[FindingRecord]:
+        with self.connection_for_case(case) as connection:
+            return self._load_findings(connection)
 
     def recent_snapshot(
         self,
@@ -645,6 +770,18 @@ class CaseStore:
                 connection,
                 "snapshot.created",
                 f"Captured public URL snapshot {url}",
+            )
+            self._insert_findings(
+                connection,
+                [
+                    _FindingInput(
+                        finding_type="metadata_record",
+                        value=url,
+                        source="snapshot_url",
+                        confidence="high",
+                        raw_reference=str(body_path),
+                    )
+                ],
             )
         return record
 
@@ -764,6 +901,7 @@ class CaseStore:
             ]
             graph_summary = self._graph_summary(connection)
             investigations = self._load_investigations(connection)
+            source_investigations = self._load_source_investigations(connection)
             adapter_results = [
                 AdapterResultRecord(
                     source=row["source"],
@@ -782,6 +920,7 @@ class CaseStore:
                     """
                 ).fetchall()
             ]
+            findings = self._load_findings(connection)
             snapshots = [
                 SnapshotRecord(
                     url=row["url"],
@@ -815,7 +954,9 @@ class CaseStore:
             graph_summary=graph_summary,
             timeline=timeline,
             investigations=investigations,
+            source_investigations=source_investigations,
             adapter_results=adapter_results,
+            findings=findings,
             snapshots=snapshots,
         )
 
@@ -969,6 +1110,37 @@ class CaseStore:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS normalized_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                finding_id TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                raw_reference TEXT NOT NULL,
+                UNIQUE(type, value, source)
+            );
+
+            CREATE TABLE IF NOT EXISTS source_investigations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                source_count INTEGER NOT NULL,
+                result_count INTEGER NOT NULL,
+                skipped_count INTEGER NOT NULL,
+                failed_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS source_investigation_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                investigation_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                error TEXT NOT NULL,
+                FOREIGN KEY (investigation_id) REFERENCES source_investigations (id)
+            );
+
             CREATE TABLE IF NOT EXISTS snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 url TEXT NOT NULL,
@@ -1081,6 +1253,69 @@ class CaseStore:
             )
         return investigations
 
+    def _load_findings(self, connection: sqlite3.Connection) -> list[FindingRecord]:
+        return [
+            FindingRecord(
+                finding_id=row["finding_id"],
+                finding_type=row["type"],
+                value=row["value"],
+                source=row["source"],
+                confidence=row["confidence"],
+                created_at=row["created_at"],
+                raw_reference=row["raw_reference"],
+            )
+            for row in connection.execute(
+                """
+                SELECT finding_id, type, value, source, confidence,
+                       created_at, raw_reference
+                FROM normalized_findings
+                ORDER BY id
+                """
+            ).fetchall()
+        ]
+
+    def _load_source_investigations(
+        self,
+        connection: sqlite3.Connection,
+    ) -> list[SourceInvestigationRecord]:
+        investigations: list[SourceInvestigationRecord] = []
+        for row in connection.execute(
+            """
+            SELECT id, target_type, target, source_count, result_count,
+                   skipped_count, failed_count, created_at
+            FROM source_investigations
+            ORDER BY id
+            """
+        ).fetchall():
+            errors = [
+                SourceInvestigationErrorRecord(
+                    source=error["source"],
+                    error=error["error"],
+                )
+                for error in connection.execute(
+                    """
+                    SELECT source, error
+                    FROM source_investigation_errors
+                    WHERE investigation_id = ?
+                    ORDER BY id
+                    """,
+                    (row["id"],),
+                ).fetchall()
+            ]
+            investigations.append(
+                SourceInvestigationRecord(
+                    target_type=row["target_type"],
+                    target=row["target"],
+                    source_count=row["source_count"],
+                    result_count=row["result_count"],
+                    skipped_count=row["skipped_count"],
+                    failed_count=row["failed_count"],
+                    created_at=row["created_at"],
+                    errors=errors,
+                )
+            )
+        return investigations
+
     def _entity_record(self, entity_type: str, value: str, note: str) -> EntityRecord:
         return EntityRecord(
             entity_id=str(uuid.uuid4()),
@@ -1187,6 +1422,45 @@ class CaseStore:
         )
         return record
 
+    def _insert_findings(
+        self,
+        connection: sqlite3.Connection,
+        findings: list[_FindingInput],
+    ) -> None:
+        if not findings:
+            return
+        created_at = utc_now_iso()
+        rows = [
+            (
+                str(uuid.uuid4()),
+                finding.finding_type,
+                finding.value,
+                finding.source,
+                _normalize_confidence(finding.confidence),
+                created_at,
+                finding.raw_reference,
+            )
+            for finding in _dedupe_finding_inputs(findings)
+            if finding.finding_type in ALLOWED_FINDING_TYPES and finding.value
+        ]
+        if not rows:
+            return
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO normalized_findings (
+                finding_id,
+                type,
+                value,
+                source,
+                confidence,
+                created_at,
+                raw_reference
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
     def _require_entity(self, connection: sqlite3.Connection, entity_id: str) -> None:
         row = connection.execute(
             "SELECT entity_id FROM entities WHERE entity_id = ?",
@@ -1214,3 +1488,119 @@ def _variant_confidence(variant: UsernameVariant) -> str:
     if variant.confidence is None:
         raise ValueError("Original username variant cannot be related to itself.")
     return variant.confidence
+
+
+def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_FindingInput]:
+    findings: list[_FindingInput] = []
+    for result in results:
+        source = result.source
+        confidence = _normalize_confidence(result.confidence)
+        if source in {"sherlock", "sherlock_username", "maigret"}:
+            findings.append(
+                _FindingInput(
+                    finding_type="discovered_profile",
+                    value=result.url,
+                    source=source,
+                    confidence=confidence,
+                    raw_reference=result.raw_reference,
+                )
+            )
+            continue
+
+        if source == "rdap_domain":
+            findings.append(
+                _FindingInput(
+                    finding_type="registration_record",
+                    value=result.target,
+                    source=source,
+                    confidence="high",
+                    raw_reference=result.raw_reference,
+                )
+            )
+            if not result.url.startswith("https://rdap.org/domain/"):
+                findings.append(
+                    _FindingInput(
+                        finding_type="discovered_url",
+                        value=result.url,
+                        source=source,
+                        confidence="medium",
+                        raw_reference=result.raw_reference,
+                    )
+                )
+            continue
+
+        if source == "crtsh_domain":
+            domain_value = result.raw_reference or result.url.removeprefix("https://")
+            findings.extend(
+                [
+                    _FindingInput(
+                        finding_type="certificate_record",
+                        value=domain_value,
+                        source=source,
+                        confidence="high",
+                        raw_reference=result.raw_reference,
+                    ),
+                    _FindingInput(
+                        finding_type="discovered_domain",
+                        value=domain_value,
+                        source=source,
+                        confidence="medium",
+                        raw_reference=result.raw_reference,
+                    ),
+                ]
+            )
+            continue
+
+        if source == "wayback_url":
+            findings.append(
+                _FindingInput(
+                    finding_type="archive_record",
+                    value=result.url,
+                    source=source,
+                    confidence=confidence,
+                    raw_reference=result.raw_reference,
+                )
+            )
+            continue
+
+        if source == "http_snapshot":
+            findings.append(
+                _FindingInput(
+                    finding_type="metadata_record",
+                    value=result.url,
+                    source=source,
+                    confidence="high",
+                    raw_reference=result.raw_reference,
+                )
+            )
+            continue
+
+        findings.append(
+            _FindingInput(
+                finding_type="discovered_url",
+                value=result.url,
+                source=source,
+                confidence=confidence,
+                raw_reference=result.raw_reference,
+            )
+        )
+    return findings
+
+
+def _normalize_confidence(confidence: str) -> str:
+    cleaned = confidence.strip().lower()
+    if cleaned in ALLOWED_CONFIDENCES:
+        return cleaned
+    return "medium"
+
+
+def _dedupe_finding_inputs(findings: list[_FindingInput]) -> list[_FindingInput]:
+    deduped: list[_FindingInput] = []
+    seen: set[tuple[str, str, str]] = set()
+    for finding in findings:
+        key = (finding.finding_type, finding.value, finding.source)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped

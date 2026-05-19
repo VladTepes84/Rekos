@@ -125,12 +125,41 @@ class AdapterResultRecord:
 
 
 @dataclass(frozen=True)
+class FindingRecord:
+    finding_id: str
+    finding_type: str
+    value: str
+    source: str
+    confidence: str
+    created_at: str
+    raw_reference: str
+
+
+@dataclass(frozen=True)
 class InvestigationSummaryRecord:
     username: str
     variant_count: int
     profile_count: int
     created_at: str
     profiles: list[InvestigationProfileRecord]
+
+
+@dataclass(frozen=True)
+class SourceInvestigationErrorRecord:
+    source: str
+    error: str
+
+
+@dataclass(frozen=True)
+class SourceInvestigationRecord:
+    target_type: str
+    target: str
+    source_count: int
+    result_count: int
+    skipped_count: int
+    failed_count: int
+    created_at: str
+    errors: list[SourceInvestigationErrorRecord]
 
 
 @dataclass(frozen=True)
@@ -158,5 +187,7 @@ class CaseSnapshot:
     graph_summary: GraphSummaryRecord
     timeline: list[TimelineEventRecord]
     investigations: list[InvestigationSummaryRecord]
+    source_investigations: list[SourceInvestigationRecord]
     adapter_results: list[AdapterResultRecord]
+    findings: list[FindingRecord]
     snapshots: list[SnapshotRecord]
