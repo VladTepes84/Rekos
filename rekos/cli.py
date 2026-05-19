@@ -34,20 +34,7 @@ banner_console = Console(width=120)
 error_console = Console(stderr=True, width=240)
 
 
-QUICKSTART_TEXT = """REKOS quickstart
-
-Install:
-  pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"
-
-Basic workflow:
-  rekos new-case social_test
-  rekos investigate username social_test username
-  rekos findings social_test
-  rekos score social_test
-  rekos graph-summary social_test
-  rekos export-case social_test --output social_test.zip
-
-Common commands:
+QUICKSTART_TEXT = """Common commands:
   rekos sources list
   rekos sources check
   rekos show-investigation <case>
