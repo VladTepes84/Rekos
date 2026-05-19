@@ -16,7 +16,12 @@ from .banner import render_banner
 from .errors import RekosError
 from .exporting import export_case
 from .hashfile import sha256_file
-from .investigation import investigate_domain, investigate_url, investigate_username
+from .investigation import (
+    SourceInvestigationFailure,
+    investigate_domain,
+    investigate_url,
+    investigate_username,
+)
 from .osint import collect_metadata, scan_username
 from .reporting import render_report
 from .snapshots import snapshot_investigation, snapshot_url
@@ -355,7 +360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             console.print(f"Variants: {len(result.variants)}")
             console.print(f"Discovered profiles: {len(result.profiles)}")
             for failure in result.failures:
-                console.print(f"[yellow]Warning:[/yellow] {failure.error}")
+                console.print(f"[yellow]Warning:[/yellow] {_username_failure_warning(failure, result.username)}")
             return 0
 
         if args.command == "investigate" and args.investigation_type == "domain":
@@ -556,6 +561,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def console_main() -> None:
     sys.exit(main())
+
+
+def _username_failure_warning(failure: SourceInvestigationFailure, username: str) -> str:
+    if failure.source == "maigret_username" and not failure.error.startswith("Missing dependencies"):
+        return f"Maigret source failed for {username}; continuing with other sources."
+    return failure.error
 
 
 if __name__ == "__main__":

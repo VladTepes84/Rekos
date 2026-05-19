@@ -103,14 +103,17 @@ def investigate_username(
                     f"Skipped source {adapter.name}: {exc}",
                 )
                 continue
-            except ExternalToolExecutionError:
+            except ExternalToolExecutionError as exc:
                 failed_count += 1
-                message = _clean_sherlock_failure_message(adapter.name, variant.value)
+                if adapter.name == "maigret_username":
+                    message = str(exc)
+                else:
+                    message = _clean_sherlock_failure_message(adapter.name, variant.value)
                 failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
                 store.add_timeline_event(
                     case,
                     "source.failed",
-                    f"Source {adapter.name} failed for username variant",
+                    f"Source {adapter.name} failed for username variant: {message}",
                 )
                 continue
             export_path = _write_export(

@@ -1204,6 +1204,48 @@ def test_investigate_username_records_missing_maigret_source(
     assert summary == (1, 0)
 
 
+def test_investigate_username_prints_clean_maigret_runtime_warning(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
+
+    def fake_sherlock(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    def fail_maigret(self, case: str, target: str) -> str:
+        raise ExternalToolExecutionError(
+            "maigret failed: Traceback (most recent call last): upstream details"
+        )
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_sherlock)
+    monkeypatch.setattr(MaigretAdapter, "run", fail_maigret)
+
+    assert main(["new-case", "case-maigret-runtime-failure"]) == 0
+    assert main(["investigate", "username", "case-maigret-runtime-failure", "peppespan00ac"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Warning: Maigret source failed for peppespan00ac; continuing with other sources." in output
+    assert "Traceback" not in output
+    assert "upstream details" not in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-maigret-runtime-failure" / "rekos.db") as connection:
+        row = connection.execute(
+            "SELECT source, error FROM source_investigation_errors"
+        ).fetchone()
+
+    assert row[0] == "maigret_username"
+    assert "Traceback" in row[1]
+    assert "upstream details" in row[1]
+
+
 def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
