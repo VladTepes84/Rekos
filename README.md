@@ -14,19 +14,29 @@ Cases are stored under `~/rekos_cases/<case_name>` by default. Each case keeps i
 
 ## Installation
 
-Install from a local checkout with `pipx`:
+Recommended full install:
+
+```bash
+pipx install "git+https://github.com/VladTepes84/Rekos.git[full]"
+```
+
+The full install includes optional Maigret support for `maigret_username`. Users still run REKOS commands such as `rekos investigate username <case> <username>`; REKOS calls available username sources through its source adapters.
+
+Minimal install:
+
+```bash
+pipx install git+https://github.com/VladTepes84/Rekos.git
+```
+
+The minimal install keeps the REKOS core usable without Maigret. Username investigations still run available built-in sources and any installed external tools.
+
+Install from a local checkout:
 
 ```bash
 git clone <repo-url>
 cd rekos
 pipx install .
 rekos --help
-```
-
-Install the public v0.1 package with optional username-source tooling:
-
-```bash
-pipx install "git+https://github.com/VladTepes84/Rekos.git[full]"
 ```
 
 For development, use an editable install:
@@ -41,12 +51,14 @@ pytest
 rekos --help
 ```
 
-Optional external tools:
+## Optional Integrations
 
-- `sherlock` for `sherlock_username`
-- `maigret` is optional for `maigret_username`; install it with `pipx inject rekos maigret` or install REKOS with `[full]`
+- `sherlock` enables the `sherlock_username` source when the `sherlock` command is installed
+- `maigret` enables the `maigret_username` source; install it with `pipx inject rekos maigret` or install REKOS with `[full]`
 - `exiftool` or `mediainfo` for file metadata collection
 - Playwright is optional for URL screenshots; HTTP snapshots still work without it
+
+Users always run `rekos`, not Sherlock or Maigret directly. `rekos investigate username <case> <username>` automatically uses the username sources available in the current environment.
 
 ## Quick Start
 

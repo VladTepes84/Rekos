@@ -27,6 +27,11 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/VladTepes84/Rekos"
+Repository = "https://github.com/VladTepes84/Rekos"
+Issues = "https://github.com/VladTepes84/Rekos/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
