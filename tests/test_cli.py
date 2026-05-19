@@ -138,6 +138,9 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "findings" in subcommands
     assert "snapshot-url" in subcommands
     assert "snapshot-investigation" in subcommands
+    assert "search" in subcommands
+    assert "list-targets" in subcommands
+    assert "list-sources" in subcommands
     assert "sources" in subcommands
 
 
@@ -593,6 +596,149 @@ def test_report_renders_username_variants_and_correlations(
     assert "`possible_match` (medium)" in output
     assert "`possible_match` (low)" in output
     assert "username variant correlation" in output
+
+
+def test_search_entities_and_findings(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wayback_payload = [
+        ["timestamp", "original", "statuscode", "mimetype"],
+        ["20200101000000", "https://example.com/page", "200", "text/html"],
+    ]
+
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(200, json.dumps(wayback_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-search"]) == 0
+    assert main(
+        [
+            "add-entity",
+            "case-search",
+            "--type",
+            "domain",
+            "--value",
+            "example.com",
+            "--note",
+            "primary target",
+        ]
+    ) == 0
+    assert main(["sources", "run", "case-search", "wayback_url", "example.com"]) == 0
+    capsys.readouterr()
+
+    assert main(["search", "case-search", "example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Search Results" in output
+    assert "entity" in output
+    assert "finding" in output
+    assert "domain" in output
+    assert "archive_record" in output
+    assert "https://example.com/page" in output
+
+
+def test_search_filters_by_type_source_and_confidence(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wayback_payload = [
+        ["timestamp", "original", "statuscode", "mimetype"],
+        ["20200101000000", "https://example.com/page", "200", "text/html"],
+    ]
+
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(200, json.dumps(wayback_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-search-filter"]) == 0
+    assert main(
+        [
+            "add-entity",
+            "case-search-filter",
+            "--type",
+            "domain",
+            "--value",
+            "example.com",
+            "--note",
+            "primary target",
+        ]
+    ) == 0
+    assert main(["sources", "run", "case-search-filter", "wayback_url", "example.com"]) == 0
+    capsys.readouterr()
+
+    assert main(["search", "case-search-filter", "example.com", "--type", "entity"]) == 0
+    entity_output = capsys.readouterr().out
+    assert "entity" in entity_output
+    assert "primary target" in entity_output
+    assert "archive_record" not in entity_output
+
+    assert main(["search", "case-search-filter", "example.com", "--source", "wayback_url"]) == 0
+    source_output = capsys.readouterr().out
+    assert "archive_record" in source_output
+    assert "primary target" not in source_output
+
+    assert main(["search", "case-search-filter", "example.com", "--confidence", "medium"]) == 0
+    confidence_output = capsys.readouterr().out
+    assert "archive_record" in confidence_output
+    assert "medium" in confidence_output
+
+    assert main(["search", "case-search-filter", "example.com", "--confidence", "high"]) == 0
+    high_output = capsys.readouterr().out
+    assert "No results found" in high_output
+
+
+def test_list_targets_groups_target_like_entities(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-list-targets"]) == 0
+    assert main(["add-entity", "case-list-targets", "--type", "username", "--value", "alice"]) == 0
+    assert main(["add-entity", "case-list-targets", "--type", "domain", "--value", "example.com"]) == 0
+    assert main(["add-entity", "case-list-targets", "--type", "note", "--value", "internal-note"]) == 0
+    capsys.readouterr()
+
+    assert main(["list-targets", "case-list-targets"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Targets" in output
+    assert "username" in output
+    assert "alice" in output
+    assert "domain" in output
+    assert "example.com" in output
+    assert "internal-note" not in output
+
+
+def test_list_sources_shows_status_findings_and_errors(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    registry = FakeSourceRegistry(
+        {
+            "rdap_domain": FakeSourceAdapter("rdap_domain"),
+            "crtsh_domain": FakeSourceAdapter("crtsh_domain", fail=True),
+            "wayback_url": FakeSourceAdapter("wayback_url"),
+        }
+    )
+    monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
+
+    assert main(["new-case", "case-list-sources"]) == 0
+    assert main(["investigate", "domain", "case-list-sources", "example.com"]) == 0
+    capsys.readouterr()
+
+    assert main(["list-sources", "case-list-sources"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Source Runs" in output
+    assert "rdap_domain" in output
+    assert "wayback_url" in output
+    assert "ok" in output
+    assert "crtsh_domain" in output
+    assert "failed" in output
+    assert "temporary source failure" in output
 
 
 def test_investigate_username_with_mocked_sherlock(

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from rich.console import Console
+from rich.table import Table
 
 from .adapters.registry import default_registry
 from .errors import RekosError
@@ -24,8 +25,8 @@ from .storage import (
 from .usernames import username_variants
 
 
-console = Console()
-error_console = Console(stderr=True)
+console = Console(width=240)
+error_console = Console(stderr=True, width=240)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,8 +75,25 @@ def build_parser() -> argparse.ArgumentParser:
     list_entities = subparsers.add_parser("list-entities", help="List graph entities")
     list_entities.add_argument("case")
 
+    list_targets = subparsers.add_parser("list-targets", help="List target-like entities")
+    list_targets.add_argument("case")
+
+    list_sources = subparsers.add_parser("list-sources", help="List local source runs")
+    list_sources.add_argument("case")
+
     graph_summary = subparsers.add_parser("graph-summary", help="Summarize the entity graph")
     graph_summary.add_argument("case")
+
+    search = subparsers.add_parser("search", help="Search local case records")
+    search.add_argument("case")
+    search.add_argument("query")
+    search.add_argument(
+        "--type",
+        choices=["entity", "finding", "evidence", "timeline", "note", "relationship"],
+        dest="result_type",
+    )
+    search.add_argument("--source")
+    search.add_argument("--confidence", choices=["low", "medium", "high"])
 
     username_variants_parser = subparsers.add_parser("username-variants", help="Generate local username variants")
     username_variants_parser.add_argument("username")
@@ -205,6 +223,68 @@ def main(argv: Sequence[str] | None = None) -> int:
                 console.print(
                     f"{entity.entity_id} {entity.entity_type}: {entity.value}{note}"
                 )
+            return 0
+
+        if args.command == "list-targets":
+            entities = store.target_like_entities(args.case)
+            table = Table(title="Targets")
+            table.add_column("Type")
+            table.add_column("Value")
+            table.add_column("UUID")
+            table.add_column("Note")
+            for entity in entities:
+                table.add_row(entity.entity_type, entity.value, entity.entity_id, entity.note)
+            console.print(table if entities else "No target-like entities recorded")
+            return 0
+
+        if args.command == "list-sources":
+            runs = store.source_runs(args.case)
+            table = Table(title="Source Runs")
+            table.add_column("Source")
+            table.add_column("Target")
+            table.add_column("Status")
+            table.add_column("Findings")
+            table.add_column("Error")
+            table.add_column("Created")
+            for run in runs:
+                table.add_row(
+                    run.source,
+                    run.target,
+                    run.status,
+                    str(run.findings_count),
+                    run.error,
+                    run.created_at,
+                )
+            console.print(table if runs else "No source runs recorded")
+            return 0
+
+        if args.command == "search":
+            results = store.search(
+                args.case,
+                args.query,
+                result_type=args.result_type,
+                source=args.source,
+                confidence=args.confidence,
+            )
+            table = Table(title="Search Results")
+            table.add_column("Type")
+            table.add_column("Subtype")
+            table.add_column("Value")
+            table.add_column("Source")
+            table.add_column("Confidence")
+            table.add_column("Context")
+            table.add_column("Created")
+            for result in results:
+                table.add_row(
+                    result.result_type,
+                    result.subtype,
+                    result.value,
+                    result.source,
+                    result.confidence,
+                    result.context,
+                    result.created_at,
+                )
+            console.print(table if results else "No results found")
             return 0
 
         if args.command == "graph-summary":

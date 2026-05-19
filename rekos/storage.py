@@ -28,9 +28,11 @@ from .models import (
     MetadataRecord,
     NoteRecord,
     RelationshipRecord,
+    SearchResultRecord,
     SnapshotRecord,
     SourceInvestigationErrorRecord,
     SourceInvestigationRecord,
+    SourceRunRecord,
     TargetRecord,
     TimelineEventRecord,
     UsernameScanRecord,
@@ -50,6 +52,8 @@ ALLOWED_RELATIONSHIP_TYPES = {
     "discovered_from",
 }
 ALLOWED_CONFIDENCES = {"low", "medium", "high"}
+SEARCH_TYPES = {"entity", "finding", "evidence", "timeline", "note", "relationship"}
+TARGET_LIKE_ENTITY_TYPES = {"username", "email", "domain", "url", "ip", "phone"}
 ALLOWED_FINDING_TYPES = {
     "discovered_profile",
     "discovered_domain",
@@ -670,6 +674,122 @@ class CaseStore:
     def findings(self, case: str) -> list[FindingRecord]:
         with self.connection_for_case(case) as connection:
             return self._load_findings(connection)
+
+    def search(
+        self,
+        case: str,
+        query: str,
+        result_type: str | None = None,
+        source: str | None = None,
+        confidence: str | None = None,
+    ) -> list[SearchResultRecord]:
+        cleaned_query = query.strip().lower()
+        if not cleaned_query:
+            raise ValueError("Search query cannot be empty.")
+        cleaned_type = result_type.strip().lower() if result_type else None
+        if cleaned_type and cleaned_type not in SEARCH_TYPES:
+            allowed = ", ".join(sorted(SEARCH_TYPES))
+            raise ValueError(f"Unsupported search type '{result_type}'. Allowed: {allowed}.")
+        cleaned_source = source.strip().lower() if source else None
+        cleaned_confidence = confidence.strip().lower() if confidence else None
+        if cleaned_confidence and cleaned_confidence not in ALLOWED_CONFIDENCES:
+            allowed = ", ".join(sorted(ALLOWED_CONFIDENCES))
+            raise ValueError(f"Unsupported confidence '{confidence}'. Allowed: {allowed}.")
+
+        with self.connection_for_case(case) as connection:
+            results: list[SearchResultRecord] = []
+            if cleaned_type in {None, "entity"}:
+                results.extend(_search_entities(connection, cleaned_query))
+            if cleaned_type in {None, "relationship"}:
+                results.extend(_search_relationships(connection, cleaned_query))
+            if cleaned_type in {None, "finding"}:
+                results.extend(_search_findings(connection, cleaned_query))
+            if cleaned_type in {None, "evidence"}:
+                results.extend(_search_evidence(connection, cleaned_query))
+            if cleaned_type in {None, "timeline"}:
+                results.extend(_search_timeline(connection, cleaned_query))
+            if cleaned_type in {None, "note"}:
+                results.extend(_search_notes(connection, cleaned_query))
+
+        return [
+            result
+            for result in results
+            if _record_matches_filters(result, cleaned_source, cleaned_confidence)
+        ]
+
+    def target_like_entities(self, case: str) -> list[EntityRecord]:
+        with self.connection_for_case(case) as connection:
+            return [
+                EntityRecord(
+                    entity_id=row["entity_id"],
+                    entity_type=row["entity_type"],
+                    value=row["value"],
+                    note=row["note"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT entity_id, entity_type, value, note, created_at
+                    FROM entities
+                    WHERE entity_type IN (?, ?, ?, ?, ?, ?)
+                    ORDER BY entity_type, value
+                    """,
+                    tuple(sorted(TARGET_LIKE_ENTITY_TYPES)),
+                ).fetchall()
+            ]
+
+    def source_runs(self, case: str) -> list[SourceRunRecord]:
+        with self.connection_for_case(case) as connection:
+            finding_counts = {
+                row["source"]: row["count"]
+                for row in connection.execute(
+                    """
+                    SELECT source, COUNT(*) AS count
+                    FROM normalized_findings
+                    GROUP BY source
+                    """
+                ).fetchall()
+            }
+            runs = [
+                SourceRunRecord(
+                    source=row["source"],
+                    target=row["target"],
+                    status="ok",
+                    findings_count=finding_counts.get(row["source"], 0),
+                    error="",
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT source, target, created_at, COUNT(*) AS result_count
+                    FROM adapter_results
+                    GROUP BY source, target, created_at
+                    ORDER BY created_at, source, target
+                    """
+                ).fetchall()
+            ]
+            error_runs = [
+                SourceRunRecord(
+                    source=row["source"],
+                    target=row["target"],
+                    status="skipped"
+                    if row["error"].startswith("Missing dependencies:")
+                    else "failed",
+                    findings_count=finding_counts.get(row["source"], 0),
+                    error=row["error"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT e.source, e.error, i.target, i.created_at
+                    FROM source_investigation_errors e
+                    JOIN source_investigations i
+                        ON i.id = e.investigation_id
+                    ORDER BY i.created_at, e.source
+                    """
+                ).fetchall()
+            ]
+        return [*runs, *error_runs]
 
     def recent_snapshot(
         self,
@@ -1482,6 +1602,194 @@ class CaseStore:
             """,
             (event_type, summary, utc_now_iso()),
         )
+
+
+def _search_entities(
+    connection: sqlite3.Connection,
+    query: str,
+) -> list[SearchResultRecord]:
+    return [
+        SearchResultRecord(
+            result_type="entity",
+            subtype=row["entity_type"],
+            value=row["value"],
+            source="",
+            confidence="",
+            context=row["note"] or row["entity_id"],
+            created_at=row["created_at"],
+        )
+        for row in connection.execute(
+            """
+            SELECT entity_id, entity_type, value, note, created_at
+            FROM entities
+            ORDER BY id
+            """
+        ).fetchall()
+        if _contains_query(query, row["entity_id"], row["entity_type"], row["value"], row["note"])
+    ]
+
+
+def _search_relationships(
+    connection: sqlite3.Connection,
+    query: str,
+) -> list[SearchResultRecord]:
+    return [
+        SearchResultRecord(
+            result_type="relationship",
+            subtype=row["relationship_type"],
+            value=f"{row['source_entity_id']} -> {row['target_entity_id']}",
+            source="",
+            confidence=row["confidence"],
+            context=row["note"] or row["relationship_id"],
+            created_at=row["created_at"],
+        )
+        for row in connection.execute(
+            """
+            SELECT relationship_id, source_entity_id, target_entity_id,
+                   relationship_type, confidence, note, created_at
+            FROM relationships
+            ORDER BY id
+            """
+        ).fetchall()
+        if _contains_query(
+            query,
+            row["relationship_id"],
+            row["source_entity_id"],
+            row["target_entity_id"],
+            row["relationship_type"],
+            row["confidence"],
+            row["note"],
+        )
+    ]
+
+
+def _search_findings(
+    connection: sqlite3.Connection,
+    query: str,
+) -> list[SearchResultRecord]:
+    return [
+        SearchResultRecord(
+            result_type="finding",
+            subtype=row["type"],
+            value=row["value"],
+            source=row["source"],
+            confidence=row["confidence"],
+            context=row["raw_reference"],
+            created_at=row["created_at"],
+        )
+        for row in connection.execute(
+            """
+            SELECT finding_id, type, value, source, confidence,
+                   created_at, raw_reference
+            FROM normalized_findings
+            ORDER BY id
+            """
+        ).fetchall()
+        if _contains_query(
+            query,
+            row["finding_id"],
+            row["type"],
+            row["value"],
+            row["source"],
+            row["confidence"],
+            row["raw_reference"],
+        )
+    ]
+
+
+def _search_evidence(
+    connection: sqlite3.Connection,
+    query: str,
+) -> list[SearchResultRecord]:
+    return [
+        SearchResultRecord(
+            result_type="evidence",
+            subtype=row["type"],
+            value=row["path"],
+            source=row["source_url"],
+            confidence="",
+            context=row["note"] or row["sha256"],
+            created_at=row["created_at"],
+        )
+        for row in connection.execute(
+            """
+            SELECT evidence_id, type, path, sha256, created_at, source_url, note
+            FROM evidence
+            ORDER BY id
+            """
+        ).fetchall()
+        if _contains_query(
+            query,
+            row["evidence_id"],
+            row["type"],
+            row["path"],
+            row["sha256"],
+            row["source_url"],
+            row["note"],
+        )
+    ]
+
+
+def _search_timeline(
+    connection: sqlite3.Connection,
+    query: str,
+) -> list[SearchResultRecord]:
+    return [
+        SearchResultRecord(
+            result_type="timeline",
+            subtype=row["event_type"],
+            value=row["summary"],
+            source="",
+            confidence="",
+            context=row["event_type"],
+            created_at=row["created_at"],
+        )
+        for row in connection.execute(
+            """
+            SELECT event_type, summary, created_at
+            FROM timeline_events
+            ORDER BY id
+            """
+        ).fetchall()
+        if _contains_query(query, row["event_type"], row["summary"])
+    ]
+
+
+def _search_notes(
+    connection: sqlite3.Connection,
+    query: str,
+) -> list[SearchResultRecord]:
+    return [
+        SearchResultRecord(
+            result_type="note",
+            subtype="note",
+            value=row["text"],
+            source="",
+            confidence="",
+            context=row["text"],
+            created_at=row["added_at"],
+        )
+        for row in connection.execute(
+            "SELECT text, added_at FROM notes ORDER BY id"
+        ).fetchall()
+        if _contains_query(query, row["text"])
+    ]
+
+
+def _contains_query(query: str, *values: object) -> bool:
+    return any(query in str(value or "").lower() for value in values)
+
+
+def _record_matches_filters(
+    result: SearchResultRecord,
+    source: str | None,
+    confidence: str | None,
+) -> bool:
+    if source and result.source.lower() != source:
+        return False
+    if confidence and result.confidence.lower() != confidence:
+        return False
+    return True
 
 
 def _variant_confidence(variant: UsernameVariant) -> str:

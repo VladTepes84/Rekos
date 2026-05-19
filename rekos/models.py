@@ -136,6 +136,27 @@ class FindingRecord:
 
 
 @dataclass(frozen=True)
+class SearchResultRecord:
+    result_type: str
+    subtype: str
+    value: str
+    source: str
+    confidence: str
+    context: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class SourceRunRecord:
+    source: str
+    target: str
+    status: str
+    findings_count: int
+    error: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class InvestigationSummaryRecord:
     username: str
     variant_count: int
