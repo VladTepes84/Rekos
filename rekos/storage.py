@@ -25,6 +25,7 @@ from .models import (
     UsernameScanRecord,
 )
 from .paths import case_path, database_path, validate_case_name
+from .usernames import UsernameVariant, username_variants
 
 
 ALLOWED_TARGET_TYPES = {"username"}
@@ -279,6 +280,39 @@ class CaseStore:
     def graph_summary(self, case: str) -> GraphSummaryRecord:
         with self.connection_for_case(case) as connection:
             return self._graph_summary(connection)
+
+    def add_username_target(self, case: str, username: str) -> tuple[EntityRecord, list[EntityRecord]]:
+        variants = username_variants(username)
+        original_variant = variants[0]
+        original_record = self._entity_record("username", original_variant.value, "original username target")
+        variant_records = [
+            self._entity_record("username", variant.value, "username variant")
+            for variant in variants[1:]
+        ]
+
+        with self.connection_for_case(case) as connection:
+            self._insert_entity(connection, original_record)
+            self._insert_timeline_event(
+                connection,
+                "entity.created",
+                f"Created username entity {original_record.value}",
+            )
+            for variant, record in zip(variants[1:], variant_records):
+                self._insert_entity(connection, record)
+                self._insert_timeline_event(
+                    connection,
+                    "entity.created",
+                    f"Created username variant entity {record.value}",
+                )
+                self._insert_relationship(
+                    connection,
+                    source_entity_id=original_record.entity_id,
+                    target_entity_id=record.entity_id,
+                    relationship_type="possible_match",
+                    confidence=_variant_confidence(variant),
+                    note="username variant correlation",
+                )
+        return original_record, variant_records
 
     def snapshot(self, case: str) -> CaseSnapshot:
         with self.connection_for_case(case) as connection:
@@ -562,6 +596,83 @@ class CaseStore:
             most_connected=most_connected,
         )
 
+    def _entity_record(self, entity_type: str, value: str, note: str) -> EntityRecord:
+        return EntityRecord(
+            entity_id=str(uuid.uuid4()),
+            entity_type=entity_type,
+            value=value,
+            note=note,
+            created_at=utc_now_iso(),
+        )
+
+    def _insert_entity(
+        self,
+        connection: sqlite3.Connection,
+        record: EntityRecord,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO entities (entity_id, entity_type, value, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                record.entity_id,
+                record.entity_type,
+                record.value,
+                record.note,
+                record.created_at,
+            ),
+        )
+
+    def _insert_relationship(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_entity_id: str,
+        target_entity_id: str,
+        relationship_type: str,
+        confidence: str,
+        note: str,
+    ) -> RelationshipRecord:
+        record = RelationshipRecord(
+            relationship_id=str(uuid.uuid4()),
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            confidence=confidence,
+            note=note,
+            created_at=utc_now_iso(),
+        )
+        connection.execute(
+            """
+            INSERT INTO relationships (
+                relationship_id,
+                source_entity_id,
+                target_entity_id,
+                relationship_type,
+                confidence,
+                note,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.relationship_id,
+                record.source_entity_id,
+                record.target_entity_id,
+                record.relationship_type,
+                record.confidence,
+                record.note,
+                record.created_at,
+            ),
+        )
+        self._insert_timeline_event(
+            connection,
+            "relationship.created",
+            f"Created {record.relationship_type} relationship",
+        )
+        return record
+
     def _require_entity(self, connection: sqlite3.Connection, entity_id: str) -> None:
         row = connection.execute(
             "SELECT entity_id FROM entities WHERE entity_id = ?",
@@ -583,3 +694,9 @@ class CaseStore:
             """,
             (event_type, summary, utc_now_iso()),
         )
+
+
+def _variant_confidence(variant: UsernameVariant) -> str:
+    if variant.confidence is None:
+        raise ValueError("Original username variant cannot be related to itself.")
+    return variant.confidence

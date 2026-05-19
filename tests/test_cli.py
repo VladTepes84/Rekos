@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from rekos.cli import build_parser, main
+from rekos.usernames import username_variants
 
 
 def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -52,6 +53,42 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "relate-entities" in subcommands
     assert "list-entities" in subcommands
     assert "graph-summary" in subcommands
+    assert "username-variants" in subcommands
+    assert "add-username-target" in subcommands
+
+
+def test_username_variant_generation_and_deduplication() -> None:
+    variants = username_variants("Alice.Smith_test")
+
+    assert [variant.value for variant in variants] == [
+        "Alice.Smith_test",
+        "alice.smith_test",
+        "AliceSmith_test",
+        "Alice.Smithtest",
+        "Alice_Smith_test",
+        "Alice.Smith.test",
+        "AliceSmithtest",
+    ]
+    assert [variant.confidence for variant in variants] == [
+        None,
+        "high",
+        "low",
+        "low",
+        "medium",
+        "medium",
+        "low",
+    ]
+    assert [variant.value for variant in username_variants("alice")] == ["alice"]
+
+
+def test_username_variants_command_outputs_deduplicated_variants(capsys) -> None:
+    assert main(["username-variants", "Alice.Smith_test"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Alice.Smith_test" in output
+    assert "alice.smith_test (high)" in output
+    assert "Alice_Smith_test (medium)" in output
+    assert "AliceSmithtest (low)" in output
 
 
 def test_entity_creation_persists_uuid(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -86,6 +123,62 @@ def test_entity_creation_persists_uuid(tmp_path: Path, monkeypatch, capsys) -> N
     uuid.UUID(row[0])
     assert row[1:] == ("username", "alice", "public profile")
     assert event_type == "entity.created"
+
+
+def test_add_username_target_creates_variant_graph(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-user-target"]) == 0
+    assert main(["add-username-target", "case-user-target", "Alice.Smith_test"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Added username target" in output
+    assert "Variants: 6" in output
+
+    db_path = tmp_path / "rekos_cases" / "case-user-target" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entities = connection.execute(
+            "SELECT entity_id, entity_type, value, note FROM entities ORDER BY id"
+        ).fetchall()
+        relationships = connection.execute(
+            """
+            SELECT relationship_type, confidence, note
+            FROM relationships
+            ORDER BY id
+            """
+        ).fetchall()
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM timeline_events ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert [row[2] for row in entities] == [
+        "Alice.Smith_test",
+        "alice.smith_test",
+        "AliceSmith_test",
+        "Alice.Smithtest",
+        "Alice_Smith_test",
+        "Alice.Smith.test",
+        "AliceSmithtest",
+    ]
+    assert all(row[1] == "username" for row in entities)
+    assert entities[0][3] == "original username target"
+    assert all(row[0] == "possible_match" for row in relationships)
+    assert [row[1] for row in relationships] == [
+        "high",
+        "low",
+        "low",
+        "medium",
+        "medium",
+        "low",
+    ]
+    assert all(row[2] == "username variant correlation" for row in relationships)
+    assert event_types.count("entity.created") == 7
+    assert event_types.count("relationship.created") == 6
 
 
 def test_relationship_creation_persists_with_confidence(
@@ -283,6 +376,26 @@ def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> N
     assert "`possible_match` (medium)" in output
     assert "## Graph Summary" in output
     assert "Total entities: 2" in output
+
+
+def test_report_renders_username_variants_and_correlations(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-variant-report"]) == 0
+    assert main(["add-username-target", "case-variant-report", "Alice.Smith_test"]) == 0
+    capsys.readouterr()
+
+    assert main(["report", "case-variant-report"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Alice.Smith_test" in output
+    assert "alice.smith_test" in output
+    assert "`possible_match` (high)" in output
+    assert "`possible_match` (medium)" in output
+    assert "`possible_match` (low)" in output
+    assert "username variant correlation" in output
 
 
 def test_metadata_returns_clear_error_when_tools_are_missing(

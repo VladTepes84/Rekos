@@ -18,6 +18,7 @@ from .storage import (
     ALLOWED_RELATIONSHIP_TYPES,
     CaseStore,
 )
+from .usernames import username_variants
 
 
 console = Console()
@@ -72,6 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     graph_summary = subparsers.add_parser("graph-summary", help="Summarize the entity graph")
     graph_summary.add_argument("case")
+
+    username_variants_parser = subparsers.add_parser("username-variants", help="Generate local username variants")
+    username_variants_parser.add_argument("username")
+
+    add_username_target = subparsers.add_parser(
+        "add-username-target",
+        help="Add a username target and graph variants",
+    )
+    add_username_target.add_argument("case")
+    add_username_target.add_argument("username")
 
     add_note = subparsers.add_parser("add-note", help="Add a note to a case")
     add_note.add_argument("case")
@@ -175,6 +186,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
             else:
                 console.print("- None recorded")
+            return 0
+
+        if args.command == "username-variants":
+            for variant in username_variants(args.username):
+                if variant.confidence:
+                    console.print(f"{variant.value} ({variant.confidence})")
+                else:
+                    console.print(variant.value)
+            return 0
+
+        if args.command == "add-username-target":
+            original, variants = store.add_username_target(args.case, args.username)
+            console.print(f"[green]Added username target[/green] {original.value}")
+            console.print(f"Original UUID: [bold]{original.entity_id}[/bold]")
+            console.print(f"Variants: {len(variants)}")
             return 0
 
         if args.command == "add-note":
