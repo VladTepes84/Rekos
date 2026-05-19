@@ -12,6 +12,7 @@ from rich.table import Table
 
 from . import __version__
 from .adapters.registry import default_registry
+from .banner import render_banner
 from .errors import RekosError
 from .exporting import export_case
 from .hashfile import sha256_file
@@ -29,6 +30,7 @@ from .usernames import username_variants
 
 
 console = Console(width=240)
+banner_console = Console(width=120)
 error_console = Console(stderr=True, width=240)
 
 
@@ -206,10 +208,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.command == "quickstart":
+            banner_console.print(render_banner())
             console.print(QUICKSTART_TEXT, markup=False)
             return 0
 
         if args.command == "version":
+            banner_console.print(render_banner())
             console.print(f"rekos {__version__}")
             return 0
 

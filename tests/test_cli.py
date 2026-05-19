@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 import tomllib
 import uuid
 import zipfile
@@ -20,6 +21,7 @@ from rekos.adapters import (
     WmnUsernameAdapter,
 )
 from rekos.adapters.registry import default_registry
+from rekos.banner import render_banner
 from rekos.cli import build_parser, main
 from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
 from rekos.storage import CaseStore, quality_label
@@ -179,6 +181,7 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert main(["quickstart"]) == 0
 
     output = capsys.readouterr().out
+    assert "REKOS READY" in output
     assert "REKOS quickstart" in output
     assert 'pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"' in output
     assert "rekos investigate username social_test username" in output
@@ -189,8 +192,26 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
 def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
-    output = capsys.readouterr().out.strip()
-    assert output == "rekos 0.1.0"
+    output = capsys.readouterr().out
+    assert "REKOS READY" in output
+    assert "rekos 0.1.0" in output
+
+
+def test_banner_renderer_falls_back_without_pyfiglet(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "pyfiglet", None)
+
+    banner = render_banner()
+
+    assert banner is not None
+
+
+def test_help_output_has_no_banner(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "REKOS READY" not in output
 
 
 def test_username_variant_generation_and_deduplication() -> None:
