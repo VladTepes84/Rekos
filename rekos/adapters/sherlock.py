@@ -17,7 +17,10 @@ URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 
 class SherlockAdapter(BaseSourceAdapter):
     name = "sherlock"
+    description = "Run Sherlock against a username and parse public profile URLs."
     supported_target_types = ("username",)
+    passive_only = True
+    external_dependencies = ("sherlock",)
 
     def run(self, case: str, target: str) -> str:
         if not shutil.which("sherlock"):
@@ -61,3 +64,7 @@ def _raw_output(stdout: str, stderr: str) -> str:
     if stderr.strip():
         parts.extend(["", "[stderr]", stderr.strip()])
     return "\n".join(part for part in parts if part).rstrip() + "\n"
+
+
+class SherlockUsernameAdapter(SherlockAdapter):
+    name = "sherlock_username"

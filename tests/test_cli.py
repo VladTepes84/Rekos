@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import uuid
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from rekos.adapters import BaseSourceAdapter, MaigretAdapter, SherlockAdapter
+from rekos.adapters.registry import default_registry
 from rekos.cli import build_parser, main
 from rekos.errors import ExternalToolMissingError
 from rekos.usernames import username_variants
@@ -68,6 +70,7 @@ def test_passive_osint_commands_are_registered() -> None:
     assert "show-investigation" in subcommands
     assert "snapshot-url" in subcommands
     assert "snapshot-investigation" in subcommands
+    assert "sources" in subcommands
 
 
 def test_username_variant_generation_and_deduplication() -> None:
@@ -110,10 +113,60 @@ def test_source_adapter_interface_contract() -> None:
 
     assert isinstance(adapter, BaseSourceAdapter)
     assert adapter.name == "sherlock"
+    assert adapter.description
     assert "username" in adapter.supported_target_types
+    assert adapter.passive_only is True
+    assert adapter.external_dependencies == ("sherlock",)
     assert isinstance(maigret, BaseSourceAdapter)
     assert maigret.name == "maigret"
+    assert maigret.description
     assert "username" in maigret.supported_target_types
+    assert maigret.passive_only is True
+    assert maigret.external_dependencies == ("maigret",)
+
+
+def test_source_adapter_registry_contains_initial_sources() -> None:
+    registry = default_registry()
+
+    sources = {adapter.name: adapter for adapter in registry.list()}
+
+    assert sorted(sources) == [
+        "crtsh_domain",
+        "http_snapshot",
+        "rdap_domain",
+        "sherlock_username",
+        "wayback_url",
+    ]
+    assert sources["sherlock_username"].supported_target_types == ("username",)
+    assert sources["sherlock_username"].external_dependencies == ("sherlock",)
+    assert sources["http_snapshot"].supported_target_types == ("url",)
+    assert sources["http_snapshot"].external_dependencies == ()
+    assert sources["rdap_domain"].supported_target_types == ("domain",)
+    assert sources["crtsh_domain"].supported_target_types == ("domain",)
+    assert sources["wayback_url"].supported_target_types == ("url", "domain")
+
+
+def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("rekos.adapters.base.shutil.which", lambda _dependency: None)
+
+    assert main(["sources", "check"]) == 0
+
+    output = capsys.readouterr().out
+    assert "http_snapshot:" in output
+    assert "Dependencies: none" in output
+    assert "sherlock_username:" in output
+    assert "sherlock: missing" in output
+
+
+def test_sources_run_missing_dependency(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.base.shutil.which", lambda _dependency: None)
+
+    assert main(["new-case", "case-source-missing"]) == 0
+    assert main(["sources", "run", "case-source-missing", "sherlock_username", "alice"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Missing dependencies for sherlock_username: sherlock" in captured.err
 
 
 def test_sherlock_adapter_parses_output() -> None:
@@ -563,7 +616,7 @@ def test_investigate_username_with_mocked_sherlock(
         "https://profiles.example/Alice_Smith",
     ]
     assert [row[2] for row in profile_rows] == ["high", "medium", "low", "medium"]
-    assert [row[0] for row in adapter_rows] == ["sherlock"] * 4
+    assert [row[0] for row in adapter_rows] == ["sherlock_username"] * 4
     assert [row[1] for row in adapter_rows] == [
         "Alice.Smith",
         "alice.smith",
@@ -648,8 +701,8 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         ("https://maigret.example/alice", "high"),
     ]
     assert adapter_rows == [
-        ("sherlock", "alice", "https://profiles.example/alice", "profiles", "high"),
-        ("sherlock", "alice", "https://shared.example/alice", "shared", "high"),
+        ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "high"),
+        ("sherlock_username", "alice", "https://shared.example/alice", "shared", "high"),
         ("maigret", "alice", "https://maigret.example/alice", "maigret", "high"),
     ]
 
@@ -745,6 +798,206 @@ class FakeHttpResponse:
 
     def read(self, _limit: int) -> bytes:
         return self._body
+
+
+def test_sources_run_http_snapshot_with_mocked_http(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        assert timeout == 15
+        return FakeHttpResponse(200, b"<html>source</html>")
+
+    monkeypatch.setattr("rekos.snapshots.urlopen", fake_urlopen)
+    monkeypatch.setattr("rekos.snapshots.importlib.util.find_spec", lambda _name: None)
+
+    assert main(["new-case", "case-source-run"]) == 0
+    assert main(
+        [
+            "sources",
+            "run",
+            "case-source-run",
+            "http_snapshot",
+            "https://profiles.example/alice",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "Ran source" in output
+    assert "http_snapshot" in output
+    assert "Results: 1" in output
+    assert requested_urls == ["https://profiles.example/alice"]
+
+    db_path = tmp_path / "rekos_cases" / "case-source-run" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        adapter_row = connection.execute(
+            """
+            SELECT source, target, url, platform, confidence
+            FROM adapter_results
+            """
+        ).fetchone()
+        snapshot_count = connection.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        evidence_count = connection.execute("SELECT COUNT(*) FROM evidence").fetchone()[0]
+
+    assert adapter_row == (
+        "http_snapshot",
+        "https://profiles.example/alice",
+        "https://profiles.example/alice",
+        "profiles",
+        "high",
+    )
+    assert snapshot_count == 1
+    assert evidence_count == 1
+
+
+def test_sources_run_rdap_domain_with_mocked_http(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rdap_payload = {
+        "objectClassName": "domain",
+        "ldhName": "example.com",
+        "links": [{"href": "https://rdap.example/entity/abc"}],
+    }
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        assert timeout == 15
+        return FakeHttpResponse(200, json.dumps(rdap_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-rdap-source"]) == 0
+    assert main(["sources", "run", "case-rdap-source", "rdap_domain", "example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Ran source" in output
+    assert "rdap_domain" in output
+    assert requested_urls == ["https://rdap.org/domain/example.com"]
+
+    case_folder = tmp_path / "rekos_cases" / "case-rdap-source"
+    assert list((case_folder / "exports" / "sources").glob("*rdap_domain*.txt"))
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        entities = connection.execute(
+            "SELECT entity_type, value FROM entities ORDER BY id"
+        ).fetchall()
+        adapter_sources = [
+            row[0]
+            for row in connection.execute(
+                "SELECT source FROM adapter_results ORDER BY id"
+            ).fetchall()
+        ]
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM timeline_events ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert ("domain", "example.com") in entities
+    assert ("url", "https://rdap.example/entity/abc") in entities
+    assert adapter_sources == ["rdap_domain", "rdap_domain"]
+    assert "source.run" in event_types
+
+
+def test_sources_run_crtsh_domain_with_mocked_http(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    crtsh_payload = [
+        {"name_value": "www.example.com\n*.api.example.com\nother.test"},
+        {"common_name": "mail.example.com"},
+    ]
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url.startswith("https://crt.sh/?")
+        assert timeout == 15
+        return FakeHttpResponse(200, json.dumps(crtsh_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-crtsh-source"]) == 0
+    assert main(["sources", "run", "case-crtsh-source", "crtsh_domain", "example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "crtsh_domain" in output
+    case_folder = tmp_path / "rekos_cases" / "case-crtsh-source"
+    assert list((case_folder / "exports" / "sources").glob("*crtsh_domain*.txt"))
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        entities = connection.execute(
+            "SELECT entity_type, value FROM entities ORDER BY id"
+        ).fetchall()
+        relationships = connection.execute(
+            "SELECT relationship_type, confidence FROM relationships ORDER BY id"
+        ).fetchall()
+        adapter_urls = [
+            row[0]
+            for row in connection.execute(
+                "SELECT url FROM adapter_results ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert ("domain", "example.com") in entities
+    assert ("domain", "www.example.com") in entities
+    assert ("domain", "api.example.com") in entities
+    assert ("domain", "mail.example.com") in entities
+    assert relationships == [
+        ("extracted_from", "medium"),
+        ("extracted_from", "medium"),
+        ("extracted_from", "medium"),
+    ]
+    assert adapter_urls == [
+        "https://www.example.com",
+        "https://api.example.com",
+        "https://mail.example.com",
+    ]
+
+
+def test_sources_run_wayback_url_with_mocked_http(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wayback_payload = [
+        ["timestamp", "original", "statuscode", "mimetype"],
+        ["20200101000000", "https://example.com/page", "200", "text/html"],
+    ]
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        assert timeout == 15
+        return FakeHttpResponse(200, json.dumps(wayback_payload).encode("utf-8"))
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-wayback-source"]) == 0
+    assert main(["sources", "run", "case-wayback-source", "wayback_url", "example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "wayback_url" in output
+    assert requested_urls[0].startswith("https://web.archive.org/cdx?")
+    archive_url = "https://web.archive.org/web/20200101000000/https://example.com/page"
+    case_folder = tmp_path / "rekos_cases" / "case-wayback-source"
+    assert list((case_folder / "exports" / "sources").glob("*wayback_url*.txt"))
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        entities = connection.execute(
+            "SELECT entity_type, value FROM entities ORDER BY id"
+        ).fetchall()
+        relationship = connection.execute(
+            "SELECT relationship_type, confidence FROM relationships"
+        ).fetchone()
+        adapter_row = connection.execute(
+            "SELECT source, target, url, platform FROM adapter_results"
+        ).fetchone()
+
+    assert ("domain", "example.com") in entities
+    assert ("url", archive_url) in entities
+    assert relationship == ("extracted_from", "medium")
+    assert adapter_row == ("wayback_url", "example.com", archive_url, "wayback")
 
 
 def test_snapshot_url_with_mocked_http_creates_artifacts_evidence_and_timeline(

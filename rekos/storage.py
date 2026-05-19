@@ -11,7 +11,7 @@ from typing import Iterator, Optional
 
 from .errors import CaseExistsError, CaseNotFoundError
 from .hashfile import sha256_file
-from .adapters import AdapterResult
+from .adapters.base import AdapterResult
 from .models import (
     AdapterResultRecord,
     CaseRecord,
@@ -218,6 +218,51 @@ class CaseStore:
             )
         return record
 
+    def ensure_entity(
+        self,
+        case: str,
+        entity_type: str,
+        value: str,
+        note: str = "",
+    ) -> EntityRecord:
+        cleaned_type = entity_type.strip().lower()
+        cleaned_value = value.strip()
+        cleaned_note = note.strip()
+        if cleaned_type not in ALLOWED_ENTITY_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_ENTITY_TYPES))
+            raise ValueError(f"Unsupported entity type '{entity_type}'. Allowed: {allowed}.")
+        if not cleaned_value:
+            raise ValueError("Entity value cannot be empty.")
+
+        with self.connection_for_case(case) as connection:
+            row = connection.execute(
+                """
+                SELECT entity_id, entity_type, value, note, created_at
+                FROM entities
+                WHERE entity_type = ? AND value = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (cleaned_type, cleaned_value),
+            ).fetchone()
+            if row is not None:
+                return EntityRecord(
+                    entity_id=row["entity_id"],
+                    entity_type=row["entity_type"],
+                    value=row["value"],
+                    note=row["note"],
+                    created_at=row["created_at"],
+                )
+
+            record = self._entity_record(cleaned_type, cleaned_value, cleaned_note)
+            self._insert_entity(connection, record)
+            self._insert_timeline_event(
+                connection,
+                "entity.created",
+                f"Created {record.entity_type} entity {record.value}",
+            )
+            return record
+
     def relate_entities(
         self,
         case: str,
@@ -288,6 +333,10 @@ class CaseStore:
     def graph_summary(self, case: str) -> GraphSummaryRecord:
         with self.connection_for_case(case) as connection:
             return self._graph_summary(connection)
+
+    def add_timeline_event(self, case: str, event_type: str, summary: str) -> None:
+        with self.connection_for_case(case) as connection:
+            self._insert_timeline_event(connection, event_type, summary)
 
     def add_username_target(self, case: str, username: str) -> tuple[EntityRecord, list[EntityRecord]]:
         variants = username_variants(username)

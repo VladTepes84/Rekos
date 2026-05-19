@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockAdapter
+from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter
 from .errors import ExternalToolMissingError
 from .osint import _safe_name, _write_export
 from .storage import CaseStore
@@ -37,7 +37,7 @@ def investigate_username(
 ) -> UsernameInvestigationResult:
     variants = username_variants(username)
     exports_folder = store.exports_folder(case)
-    adapters: list[BaseSourceAdapter] = [SherlockAdapter(), MaigretAdapter()]
+    adapters: list[BaseSourceAdapter] = [SherlockUsernameAdapter(), MaigretAdapter()]
 
     profiles: list[ProfileFinding] = []
     seen_profiles: set[tuple[str, str]] = set()
@@ -46,7 +46,7 @@ def investigate_username(
             try:
                 raw_output = adapter.run(case, variant.value)
             except ExternalToolMissingError:
-                if adapter.name == "sherlock":
+                if adapter.name == "sherlock_username":
                     raise
                 continue
             export_path = _write_export(
@@ -123,6 +123,6 @@ def _with_confidence(result: AdapterResult, confidence: str) -> AdapterResult:
 
 def _export_stem(adapter: BaseSourceAdapter, username: str) -> str:
     safe_username = _safe_name(username)
-    if adapter.name == "sherlock":
+    if adapter.name in {"sherlock", "sherlock_username"}:
         return f"investigate-username-{safe_username}"
     return f"investigate-{adapter.name}-{safe_username}"

@@ -9,6 +9,7 @@ from typing import Sequence
 
 from rich.console import Console
 
+from .adapters.registry import default_registry
 from .errors import RekosError
 from .hashfile import sha256_file
 from .investigation import investigate_username
@@ -104,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Snapshot discovered investigation profile URLs",
     )
     snapshot_investigation_parser.add_argument("case")
+
+    sources = subparsers.add_parser("sources", help="Manage passive source adapters")
+    sources_subparsers = sources.add_subparsers(dest="sources_command", required=True)
+    sources_subparsers.add_parser("list", help="List passive source adapters")
+    sources_subparsers.add_parser("check", help="Check source adapter dependencies")
+    sources_run = sources_subparsers.add_parser("run", help="Run a passive source adapter")
+    sources_run.add_argument("case")
+    sources_run.add_argument("source")
+    sources_run.add_argument("target")
 
     add_note = subparsers.add_parser("add-note", help="Add a note to a case")
     add_note.add_argument("case")
@@ -278,6 +288,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             for error in result.errors:
                 console.print(f"- {error}")
             return 0
+
+        if args.command == "sources":
+            registry = default_registry()
+            if args.sources_command == "list":
+                for adapter in registry.list():
+                    target_types = ", ".join(adapter.supported_target_types)
+                    console.print(f"{adapter.name}: {adapter.description}")
+                    console.print(f"  Targets: {target_types}")
+                    console.print(f"  Passive only: {adapter.passive_only}")
+                return 0
+
+            if args.sources_command == "check":
+                for adapter in registry.list():
+                    console.print(f"{adapter.name}:")
+                    dependencies = adapter.dependency_status()
+                    if not dependencies:
+                        console.print("  Dependencies: none")
+                        continue
+                    for dependency, available in dependencies.items():
+                        status = "available" if available else "missing"
+                        console.print(f"  {dependency}: {status}")
+                return 0
+
+            if args.sources_command == "run":
+                adapter = registry.get(args.source)
+                if not adapter.passive_only:
+                    raise ValueError(f"Source is not passive-only: {adapter.name}")
+                result = adapter.execute(args.case, args.target, store)
+                console.print(f"[green]Ran source[/green] {result.source}")
+                console.print(f"Target: {result.target}")
+                console.print(f"Results: {len(result.results)}")
+                if result.skipped:
+                    console.print("Status: skipped recent duplicate")
+                if result.artifacts:
+                    console.print("Artifacts:")
+                    for artifact in result.artifacts:
+                        console.print(f"- {artifact}")
+                return 0
 
         if args.command == "add-note":
             note = store.add_note(args.case, args.text)
