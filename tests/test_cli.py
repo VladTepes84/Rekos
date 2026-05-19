@@ -191,8 +191,8 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "rekos score my_case" in output
     assert "rekos graph-summary my_case" in output
     assert "rekos export-case my_case --output my_case.zip" in output
-    assert "Run only rekos commands" in output
-    assert "Sherlock and Maigret are optional integrations" in output
+    assert "Common commands:" not in output
+    assert "Investigations:" not in output
 
 
 def test_version_command_outputs_package_version(capsys) -> None:

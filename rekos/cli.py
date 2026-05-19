@@ -34,23 +34,6 @@ banner_console = Console(width=120)
 error_console = Console(stderr=True, width=240)
 
 
-QUICKSTART_TEXT = """Common commands:
-  rekos sources list
-  rekos sources check
-  rekos show-investigation <case>
-  rekos search <case> <query>
-  rekos report <case>
-
-Investigations:
-  A case is a local SQLite-backed workspace under ~/rekos_cases/<case>.
-  Run only rekos commands. Sherlock and Maigret are optional integrations
-  orchestrated internally when available.
-  rekos investigate username <case> <username> generates variants, runs
-  available passive username sources, normalizes findings, updates the graph,
-  scores correlation quality, and stores raw source output under exports/.
-"""
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rekos",
@@ -196,7 +179,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "quickstart":
             banner_console.print(render_banner())
-            console.print(QUICKSTART_TEXT, markup=False)
             return 0
 
         if args.command == "version":
