@@ -1,4 +1,6 @@
 # REKOS
+![REKOS quickstart](assets/rekos-quickstart.png)
+
 
 REKOS is a terminal-native passive OSINT CLI for local-first public-source investigation workspaces. It helps organize targets, evidence, source outputs, entities, relationships, normalized findings, and correlation-quality scores in a SQLite-backed case folder.
 
