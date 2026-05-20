@@ -577,7 +577,7 @@ class CaseStore:
         result_count: int,
         skipped_count: int,
         failed_count: int,
-        errors: list[tuple[str, str]],
+        errors: list[tuple[str, str, str]],
     ) -> SourceInvestigationRecord:
         cleaned_type = target_type.strip().lower()
         cleaned_target = target.strip()
@@ -588,8 +588,8 @@ class CaseStore:
 
         created_at = utc_now_iso()
         error_records = [
-            SourceInvestigationErrorRecord(source=source, error=error)
-            for source, error in errors
+            SourceInvestigationErrorRecord(source=source, status=status, error=error)
+            for source, status, error in errors
         ]
         with self.connection_for_case(case) as connection:
             connection.execute(
@@ -621,12 +621,13 @@ class CaseStore:
                 INSERT INTO source_investigation_errors (
                     investigation_id,
                     source,
+                    status,
                     error
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?)
                 """,
                 [
-                    (investigation_id, error.source, error.error)
+                    (investigation_id, error.source, error.status, error.error)
                     for error in error_records
                 ],
             )
@@ -795,7 +796,7 @@ class CaseStore:
                 SourceRunRecord(
                     source=row["source"],
                     target=row["target"],
-                    status="ok",
+                    status="available",
                     findings_count=finding_counts.get(row["source"], 0),
                     error="",
                     created_at=row["created_at"],
@@ -813,16 +814,14 @@ class CaseStore:
                 SourceRunRecord(
                     source=row["source"],
                     target=row["target"],
-                    status="skipped"
-                    if row["error"].startswith("Missing dependencies:")
-                    else "failed",
+                    status=row["status"],
                     findings_count=finding_counts.get(row["source"], 0),
                     error=row["error"],
                     created_at=row["created_at"],
                 )
                 for row in connection.execute(
                     """
-                    SELECT e.source, e.error, i.target, i.created_at
+                    SELECT e.source, e.status, e.error, i.target, i.created_at
                     FROM source_investigation_errors e
                     JOIN source_investigations i
                         ON i.id = e.investigation_id
@@ -1300,6 +1299,7 @@ class CaseStore:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 investigation_id INTEGER NOT NULL,
                 source TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'failed',
                 error TEXT NOT NULL,
                 FOREIGN KEY (investigation_id) REFERENCES source_investigations (id)
             );
@@ -1328,6 +1328,12 @@ class CaseStore:
             "normalized_findings",
             "quality_reason",
             "TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            connection,
+            "source_investigation_errors",
+            "status",
+            "TEXT NOT NULL DEFAULT 'failed'",
         )
 
     def _load_entities(self, connection: sqlite3.Connection) -> list[EntityRecord]:
@@ -1486,11 +1492,12 @@ class CaseStore:
             errors = [
                 SourceInvestigationErrorRecord(
                     source=error["source"],
+                    status=error["status"],
                     error=error["error"],
                 )
                 for error in connection.execute(
                     """
-                    SELECT source, error
+                    SELECT source, status, error
                     FROM source_investigation_errors
                     WHERE investigation_id = ?
                     ORDER BY id

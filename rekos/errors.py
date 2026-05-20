@@ -27,3 +27,7 @@ class ExternalToolMissingError(RekosError):
 
 class ExternalToolExecutionError(RekosError):
     """Raised when an optional passive OSINT tool fails."""
+
+
+class ExternalToolTimeoutError(ExternalToolExecutionError):
+    """Raised when an optional passive OSINT tool exceeds its timeout."""

@@ -7,10 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter, WmnUsernameAdapter
+from .adapters import (
+    AdapterResult,
+    BaseSourceAdapter,
+    MaigretAdapter,
+    SherlockUsernameAdapter,
+    WmnUsernameAdapter,
+    run_adapter_sandboxed,
+)
 from .adapters.registry import default_registry
 from .adapters.web_osint import normalize_domain
-from .errors import ExternalToolExecutionError, ExternalToolMissingError, RekosError
+from .errors import RekosError
 from .osint import _safe_name, _write_export
 from .snapshots import normalize_public_url
 from .storage import CaseStore
@@ -31,6 +38,7 @@ class ProfileFinding:
 @dataclass(frozen=True)
 class SourceInvestigationFailure:
     source: str
+    status: str
     error: str
 
 
@@ -76,7 +84,7 @@ def investigate_username(
             if adapter.name == "sherlock_username" and not _is_safe_sherlock_username(run_target):
                 skipped_count += 1
                 message = _clean_sherlock_failure_message(adapter.name, run_target)
-                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                failures.append(SourceInvestigationFailure(source=adapter.name, status="skipped", error=message))
                 store.add_timeline_event(
                     case,
                     "source.skipped",
@@ -86,45 +94,43 @@ def investigate_username(
             if (adapter.name, run_target) in attempted_runs:
                 continue
             attempted_runs.add((adapter.name, run_target))
-            try:
-                raw_output = adapter.run(case, run_target)
-            except ExternalToolMissingError as exc:
-                if adapter.name == "sherlock_username":
-                    raise
-                if adapter.name in skipped_missing_sources:
-                    continue
-                skipped_missing_sources.add(adapter.name)
-                skipped_count += 1
-                message = f"Missing dependencies for {adapter.name}: {exc}"
-                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
-                store.add_timeline_event(
-                    case,
-                    "source.skipped",
-                    f"Skipped source {adapter.name}: {exc}",
-                )
-                continue
-            except ExternalToolExecutionError as exc:
-                failed_count += 1
-                if adapter.name == "maigret_username":
-                    message = str(exc)
+            runtime = run_adapter_sandboxed(adapter, case, run_target)
+            if runtime.status != "available":
+                if runtime.status == "skipped":
+                    if adapter.name in skipped_missing_sources:
+                        continue
+                    skipped_missing_sources.add(adapter.name)
+                    skipped_count += 1
                 else:
-                    message = _clean_sherlock_failure_message(adapter.name, variant.value)
-                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                    failed_count += 1
+                message = _runtime_failure_message(adapter.name, variant.value, runtime.status, runtime.error)
+                failures.append(
+                    SourceInvestigationFailure(
+                        source=adapter.name,
+                        status=runtime.status,
+                        error=message,
+                    )
+                )
+                if runtime.raw_output or runtime.error:
+                    failure_log = _failure_log(runtime.status, message, runtime.raw_output)
+                    _write_export(exports_folder, _export_stem(adapter, run_target), failure_log)
+                    adapter._write_source_output(case, run_target, store, failure_log)
+                event_type = "source.skipped" if runtime.status == "skipped" else "source.failed"
                 store.add_timeline_event(
                     case,
-                    "source.failed",
-                    f"Source {adapter.name} failed for username variant: {message}",
+                    event_type,
+                    f"Source {adapter.name} {runtime.status} for username variant: {message}",
                 )
                 continue
             export_path = _write_export(
                 exports_folder,
                 _export_stem(adapter, run_target),
-                raw_output,
+                runtime.raw_output,
             )
-            source_export_path = adapter._write_source_output(case, run_target, store, raw_output)
+            source_export_path = adapter._write_source_output(case, run_target, store, runtime.raw_output)
             adapter_results = [
                 _with_confidence(result, profile_confidence(variant))
-                for result in adapter.parse_results(run_target, raw_output)
+                for result in runtime.parsed_results
             ]
             normalized_results = [
                 _with_url(result, _normalize_profile_url(result.url))
@@ -175,7 +181,7 @@ def investigate_username(
         len(profiles),
         skipped_count,
         failed_count,
-        [(failure.source, failure.error) for failure in failures],
+        [(failure.source, failure.status, failure.error) for failure in failures],
     )
     return UsernameInvestigationResult(
         username=variants[0].value,
@@ -265,6 +271,25 @@ def _clean_sherlock_failure_message(source: str, target: str) -> str:
     return f"{source} failed for {target}: upstream tool error"
 
 
+def _runtime_failure_message(source: str, target: str, status: str, error: str) -> str:
+    if status == "skipped":
+        if "Missing dependencies" not in error:
+            return f"Missing dependencies for {source}: {error}"
+        return error
+    if source in {"sherlock", "sherlock_username"}:
+        if status == "timeout":
+            return f"{source} timed out for {target}: upstream tool timeout"
+        return _clean_sherlock_failure_message(source, target)
+    return error or f"{source} {status} for {target}"
+
+
+def _failure_log(status: str, error: str, raw_output: str) -> str:
+    sections = [f"Status: {status}", f"Error: {error}"]
+    if raw_output.strip():
+        sections.extend(["", "Raw output:", raw_output.strip()])
+    return "\n".join(sections).rstrip() + "\n"
+
+
 def _normalize_profile_url(url: str) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -304,7 +329,7 @@ def _investigate_sources(
             adapter = registry.get(source_name)
         except RekosError as exc:
             skipped_count += 1
-            failures.append(SourceInvestigationFailure(source=source_name, error=str(exc)))
+            failures.append(SourceInvestigationFailure(source=source_name, status="skipped", error=str(exc)))
             store.add_timeline_event(case, "source.skipped", f"Skipped source {source_name}: {exc}")
             continue
 
@@ -312,14 +337,14 @@ def _investigate_sources(
         if missing:
             skipped_count += 1
             message = f"Missing dependencies: {', '.join(missing)}"
-            failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+            failures.append(SourceInvestigationFailure(source=adapter.name, status="skipped", error=message))
             store.add_timeline_event(case, "source.skipped", f"Skipped source {adapter.name}: {message}")
             continue
 
         try:
             result = adapter.execute(case, target, store)
         except (OSError, RekosError, ValueError) as exc:
-            failures.append(SourceInvestigationFailure(source=adapter.name, error=str(exc)))
+            failures.append(SourceInvestigationFailure(source=adapter.name, status="failed", error=str(exc)))
             store.add_timeline_event(case, "source.failed", f"Source {adapter.name} failed: {exc}")
             continue
         sources_run += 1
@@ -334,7 +359,7 @@ def _investigate_sources(
         result_count,
         skipped_count,
         failed_count,
-        [(failure.source, failure.error) for failure in failures],
+        [(failure.source, failure.status, failure.error) for failure in failures],
     )
     return MultiSourceInvestigationResult(
         target_type=target_type,

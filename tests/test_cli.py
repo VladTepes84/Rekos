@@ -23,7 +23,7 @@ from rekos.adapters import (
 from rekos.adapters.registry import default_registry
 from rekos.banner import render_banner
 from rekos.cli import build_parser, main
-from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
+from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError, ExternalToolTimeoutError
 from rekos.storage import CaseStore, quality_label
 from rekos.usernames import username_variants
 
@@ -952,7 +952,7 @@ def test_list_sources_shows_status_findings_and_errors(
     assert "Source Runs" in output
     assert "rdap_domain" in output
     assert "wayback_url" in output
-    assert "ok" in output
+    assert "available" in output
     assert "crtsh_domain" in output
     assert "failed" in output
     assert "temporary source failure" in output
@@ -1246,6 +1246,110 @@ def test_investigate_username_prints_clean_maigret_runtime_warning(
     assert "upstream details" in row[1]
 
 
+def test_investigate_username_continues_when_sherlock_times_out(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
+
+    def timeout_sherlock(self, case: str, target: str) -> str:
+        raise ExternalToolTimeoutError("sherlock timed out after 120 seconds.")
+
+    def fake_wmn(self, case: str, target: str) -> str:
+        return json.dumps(
+            {
+                "source": "wmn_username",
+                "target": target,
+                "results": [
+                    {
+                        "platform": "GitHub",
+                        "url": f"https://github.com/{target}",
+                        "status_code": 200,
+                        "hit": True,
+                        "error": "",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(SherlockAdapter, "run", timeout_sherlock)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", fake_wmn)
+
+    assert main(["new-case", "case-sherlock-timeout"]) == 0
+    assert main(["investigate", "username", "case-sherlock-timeout", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Warning: sherlock_username timed out for alice; continuing with other sources." in output
+    assert "Discovered profiles: 1" in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-sherlock-timeout" / "rekos.db") as connection:
+        error_row = connection.execute(
+            "SELECT source, status, error FROM source_investigation_errors WHERE source = ?",
+            ("sherlock_username",),
+        ).fetchone()
+        finding_count = connection.execute(
+            "SELECT COUNT(*) FROM normalized_findings WHERE source = ?",
+            ("wmn_username",),
+        ).fetchone()[0]
+
+    assert error_row[0] == "sherlock_username"
+    assert error_row[1] == "timeout"
+    assert "upstream tool timeout" in error_row[2]
+    assert finding_count == 1
+
+
+def test_investigate_username_marks_unparsable_source_output_failed(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: ["/usr/bin/maigret"])
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
+
+    def fake_sherlock(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    def raw_maigret(self, case: str, target: str) -> str:
+        return "not parseable by adapter\n"
+
+    def fail_parse(self, target: str, raw_output: str):
+        raise ValueError("unexpected output shape")
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_sherlock)
+    monkeypatch.setattr(MaigretAdapter, "run", raw_maigret)
+    monkeypatch.setattr(MaigretAdapter, "parse_results", fail_parse)
+
+    assert main(["new-case", "case-unparsable-source"]) == 0
+    assert main(["investigate", "username", "case-unparsable-source", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Warning: Maigret source failed for alice; continuing with other sources." in output
+    assert "unexpected output shape" not in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-unparsable-source" / "rekos.db") as connection:
+        error_row = connection.execute(
+            "SELECT source, status, error FROM source_investigation_errors WHERE source = ?",
+            ("maigret_username",),
+        ).fetchone()
+        finding_count = connection.execute(
+            "SELECT COUNT(*) FROM normalized_findings WHERE source = ?",
+            ("sherlock_username",),
+        ).fetchone()[0]
+
+    assert error_row == (
+        "maigret_username",
+        "failed",
+        "Failed to parse source output: unexpected output shape",
+    )
+    assert finding_count == 1
+
+
 def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -1332,12 +1436,15 @@ def test_investigate_username_missing_sherlock(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda _tool: None)
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
 
     assert main(["new-case", "case-no-sherlock"]) == 0
-    assert main(["investigate", "username", "case-no-sherlock", "alice"]) == 1
+    assert main(["investigate", "username", "case-no-sherlock", "alice"]) == 0
 
     captured = capsys.readouterr()
-    assert "Missing username investigation tool" in captured.err
+    assert "Missing dependencies for sherlock_username: sherlock." in captured.out
+    assert "Missing username investigation tool" not in captured.err
 
 
 def test_investigate_username_skips_unsafe_double_dot_variant(
