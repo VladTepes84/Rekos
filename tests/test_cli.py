@@ -758,6 +758,8 @@ def test_graph_summary_counts_and_most_connected(
     assert "domain" in output
     assert "username" in output
     assert "Most connected" in output
+    assert "Graph links" in output
+    assert "Graph links are internal relationships, not unique findings." in output
     assert "example.com" in output
     assert entity_ids[1] not in output
 
@@ -1862,13 +1864,31 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    rdap_payload = {"objectClassName": "domain", "ldhName": "example.com"}
+    rdap_payload = {
+        "objectClassName": "domain",
+        "ldhName": "example.com",
+        "links": [
+            {"href": "https://rdap.verisign.com/com/v1/domain/example.com"},
+            {"href": "https://icann.org/epp"},
+        ],
+    }
     dns_payloads = {
         "A": {"Status": 0, "Answer": [{"type": 1, "data": "93.184.216.34"}]},
         "AAAA": {"Status": 0, "Answer": [{"type": 28, "data": "2606:2800:220:1:248:1893:25c8:1946"}]},
         "MX": {"Status": 0, "Answer": [{"type": 15, "data": "10 mail.example.com."}]},
         "NS": {"Status": 0, "Answer": [{"type": 2, "data": "ns1.example.com."}]},
-        "TXT": {"Status": 0, "Answer": [{"type": 16, "data": '"v=spf1 -all"'}]},
+        "TXT": {
+            "Status": 0,
+            "Answer": [
+                {"type": 16, "data": '"v=spf1 -all"'},
+                {"type": 16, "data": '"txt-two"'},
+                {"type": 16, "data": '"txt-three"'},
+                {"type": 16, "data": '"txt-four"'},
+                {"type": 16, "data": '"txt-five"'},
+                {"type": 16, "data": '"txt-six"'},
+                {"type": 16, "data": '"txt-seven"'},
+            ],
+        },
     }
 
     def fake_urlopen(request, timeout):
@@ -1888,7 +1908,7 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     output = capsys.readouterr().out
     assert "Completed domain investigation" in output
     assert "example.com" in output
-    assert "Records discovered: 6" in output
+    assert "Records discovered: 14" in output
     assert "Sources run:" not in output
     assert "rekos findings case-domain-foundation" in output
     assert "rekos graph-summary case-domain-foundation" in output
@@ -1915,9 +1935,9 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert entity_counts["ip"] == 2
     assert entity_counts["mx"] == 1
     assert entity_counts["nameserver"] == 1
-    assert entity_counts["source"] == 1
-    assert entity_counts["txt_record"] == 1
-    assert source_summary == ("domain", "example.com", 2, 6, 0, 0)
+    assert entity_counts["source"] == 2
+    assert entity_counts["txt_record"] == 7
+    assert source_summary == ("domain", "example.com", 2, 14, 0, 0)
     assert ("registration_record", "example.com", "rdap_domain", "high") in finding_rows
     assert ("dns_record", "A example.com -> 93.184.216.34", "dns_domain", "high") in finding_rows
     assert ("dns_record", "TXT example.com -> v=spf1 -all", "dns_domain", "medium") in finding_rows
@@ -1929,15 +1949,28 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert "nameserver" in graph_output
     assert "mx" in graph_output
     assert "source" in graph_output
+    assert "Graph links" in graph_output
+    assert "Graph links are internal relationships, not unique findings." in graph_output
 
     assert main(["findings", "case-domain-foundation"]) == 0
     findings_output = capsys.readouterr().out
     assert "Completed findings summary" in findings_output
+    assert "registration_record example.com" in findings_output
     assert "dns_record" in findings_output
+    assert "A example.com -> 93.184.216.34" in findings_output
+    assert "AAAA example.com -> 2606:2800:220:1:248:1893:25c8:1946" in findings_output
+    assert "MX example.com -> mail.example.com" in findings_output
+    assert "NS example.com -> ns1.example.com" in findings_output
+    assert findings_output.count("TXT example.com ->") == 5
+    assert "... and 2 more TXT records. Run rekos findings case-domain-foundation --verbose for details." in findings_output
+    assert "https://rdap.verisign.com" not in findings_output
+    assert "https://icann.org" not in findings_output
 
     assert main(["findings", "case-domain-foundation", "--verbose"]) == 0
     verbose_output = capsys.readouterr().out
     assert "dns_record: A example.com -> 93.184.216.34" in verbose_output
+    assert "dns_record: TXT example.com -> txt-six" in verbose_output
+    assert "discovered_url: https://rdap.verisign.com/com/v1/domain/example.com" in verbose_output
     assert "from dns_domain" in verbose_output
 
 

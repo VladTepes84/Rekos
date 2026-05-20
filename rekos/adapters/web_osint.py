@@ -47,6 +47,7 @@ class RdapDomainAdapter(BaseSourceAdapter):
         store.add_adapter_results(case, results)
 
         domain_entity = store.ensure_entity(case, "domain", domain, "RDAP domain target")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
         for result in results:
             url_entity = store.ensure_entity(case, "url", result.url, "RDAP referenced URL")
             if url_entity.entity_id != domain_entity.entity_id:
@@ -57,6 +58,15 @@ class RdapDomainAdapter(BaseSourceAdapter):
                     "related_to",
                     "low",
                     "RDAP referenced URL",
+                )
+            if url_entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    url_entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "RDAP source produced URL",
                 )
         store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {domain}")
         return SourceRunResult(
