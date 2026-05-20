@@ -1058,9 +1058,14 @@ def test_investigate_username_with_mocked_sherlock(
     assert investigation_row == ("Alice.Smith", 4, 4)
     assert [row[0] for row in entity_rows].count("username") == 4
     assert [row[0] for row in entity_rows].count("url") == 4
+    assert [row[0] for row in entity_rows].count("platform") == 1
+    assert [row[0] for row in entity_rows].count("source") == 1
     assert [row[0] for row in relationship_rows].count("possible_match") == 3
     assert [row[0] for row in relationship_rows].count("discovered_from") == 4
     assert [row[0] for row in relationship_rows].count("same_target") == 4
+    assert [row[0] for row in relationship_rows].count("discovered_on") == 4
+    assert [row[0] for row in relationship_rows].count("hosts_profile") == 4
+    assert [row[0] for row in relationship_rows].count("produced") == 4
     assert [row[1] for row in profile_rows] == [
         "https://profiles.example/Alice.Smith",
         "https://profiles.example/alice.smith",
@@ -1084,6 +1089,40 @@ def test_investigate_username_with_mocked_sherlock(
     assert all(row[1] == row[4] for row in finding_rows)
     assert all(Path(row[3]).exists() for row in profile_rows)
     assert "investigation.completed" in event_types
+
+    assert main(["investigate", "username", "case-investigate", "Alice.Smith"]) == 0
+    capsys.readouterr()
+    with sqlite3.connect(db_path) as connection:
+        rerun_entity_counts = dict(
+            connection.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            ).fetchall()
+        )
+        rerun_relationship_counts = dict(
+            connection.execute(
+                "SELECT relationship_type, COUNT(*) FROM relationships GROUP BY relationship_type"
+            ).fetchall()
+        )
+
+    assert rerun_entity_counts == {
+        "platform": 1,
+        "source": 1,
+        "url": 4,
+        "username": 4,
+    }
+    assert rerun_relationship_counts == {
+        "discovered_from": 4,
+        "discovered_on": 4,
+        "hosts_profile": 4,
+        "possible_match": 3,
+        "produced": 4,
+        "same_target": 4,
+    }
+
+    assert main(["graph-summary", "case-investigate"]) == 0
+    graph_output = capsys.readouterr().out
+    assert "platform" in graph_output
+    assert "source" in graph_output
 
 
 def test_investigate_username_runs_maigret_and_deduplicates(
@@ -1530,8 +1569,8 @@ def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "Discovered profiles: 4" in output
     assert "https://profiles.example/Alice.Smith (high) from Alice.Smith" in output
     assert "https://profiles.example/alice.smith (medium) from alice.smith" in output
-    assert "Graph entities: 8" in output
-    assert "Graph relationships: 11" in output
+    assert "Graph entities: 10" in output
+    assert "Graph relationships: 23" in output
     assert "Findings: 4" in output
     assert "discovered_profile: https://profiles.example/Alice.Smith" in output
     assert "Timeline events:" in output

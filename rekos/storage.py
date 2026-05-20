@@ -43,7 +43,18 @@ from .usernames import UsernameVariant, username_variants
 
 
 ALLOWED_TARGET_TYPES = {"username"}
-ALLOWED_ENTITY_TYPES = {"username", "email", "domain", "url", "ip", "phone", "file", "note"}
+ALLOWED_ENTITY_TYPES = {
+    "username",
+    "email",
+    "domain",
+    "url",
+    "ip",
+    "phone",
+    "file",
+    "note",
+    "platform",
+    "source",
+}
 ALLOWED_RELATIONSHIP_TYPES = {
     "related_to",
     "possible_match",
@@ -51,6 +62,9 @@ ALLOWED_RELATIONSHIP_TYPES = {
     "referenced_by",
     "extracted_from",
     "discovered_from",
+    "discovered_on",
+    "hosts_profile",
+    "produced",
 }
 ALLOWED_CONFIDENCES = {"low", "medium", "high"}
 SEARCH_TYPES = {"entity", "finding", "evidence", "timeline", "note", "relationship"}
@@ -449,11 +463,6 @@ class CaseStore:
             raise ValueError("Investigation requires at least one username variant.")
 
         created_at = utc_now_iso()
-        original_record = self._entity_record("username", variants[0].value, "investigation username")
-        variant_records = [
-            self._entity_record("username", variant.value, "investigation username variant")
-            for variant in variants[1:]
-        ]
         profile_records = [
             InvestigationProfileRecord(
                 source_username=profile["source_username"],
@@ -466,22 +475,22 @@ class CaseStore:
         ]
 
         with self.connection_for_case(case) as connection:
-            self._insert_entity(connection, original_record)
-            self._insert_timeline_event(
+            original_record = self._ensure_entity_in_connection(
                 connection,
-                "entity.created",
-                f"Created investigation username entity {original_record.value}",
+                "username",
+                variants[0].value,
+                "investigation username",
             )
             username_entities = {original_record.value: original_record}
-            for variant, record in zip(variants[1:], variant_records):
-                self._insert_entity(connection, record)
-                username_entities[record.value] = record
-                self._insert_timeline_event(
+            for variant in variants[1:]:
+                record = self._ensure_entity_in_connection(
                     connection,
-                    "entity.created",
-                    f"Created investigation username variant entity {record.value}",
+                    "username",
+                    variant.value,
+                    "investigation username variant",
                 )
-                self._insert_relationship(
+                username_entities[record.value] = record
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=original_record.entity_id,
                     target_entity_id=record.entity_id,
@@ -499,20 +508,27 @@ class CaseStore:
             )
             investigation_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-            for profile in profile_records:
-                profile_entity = self._entity_record(
+            for raw_profile, profile in zip(profiles, profile_records):
+                profile_entity = self._ensure_entity_in_connection(
+                    connection,
                     "url",
                     profile.profile_url,
                     f"profile discovered from {profile.source_username}",
                 )
-                self._insert_entity(connection, profile_entity)
-                self._insert_timeline_event(
+                platform_entity = self._ensure_entity_in_connection(
                     connection,
-                    "entity.created",
-                    f"Created profile URL entity {profile.profile_url}",
+                    "platform",
+                    _profile_platform(raw_profile),
+                    "profile platform",
+                )
+                source_adapter_entity = self._ensure_entity_in_connection(
+                    connection,
+                    "source",
+                    raw_profile.get("source") or "unknown_source",
+                    "source adapter",
                 )
                 source_entity = username_entities[profile.source_username]
-                self._insert_relationship(
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=source_entity.entity_id,
                     target_entity_id=profile_entity.entity_id,
@@ -520,13 +536,37 @@ class CaseStore:
                     confidence=profile.confidence,
                     note="profile URL discovered by username investigation",
                 )
-                self._insert_relationship(
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=original_record.entity_id,
                     target_entity_id=profile_entity.entity_id,
                     relationship_type="same_target",
                     confidence=profile.confidence,
                     note="profile URL correlated to investigated username",
+                )
+                self._ensure_relationship_in_connection(
+                    connection,
+                    source_entity_id=source_entity.entity_id,
+                    target_entity_id=platform_entity.entity_id,
+                    relationship_type="discovered_on",
+                    confidence=profile.confidence,
+                    note="username observed on profile platform",
+                )
+                self._ensure_relationship_in_connection(
+                    connection,
+                    source_entity_id=platform_entity.entity_id,
+                    target_entity_id=profile_entity.entity_id,
+                    relationship_type="hosts_profile",
+                    confidence=profile.confidence,
+                    note="platform hosts profile URL",
+                )
+                self._ensure_relationship_in_connection(
+                    connection,
+                    source_entity_id=source_adapter_entity.entity_id,
+                    target_entity_id=profile_entity.entity_id,
+                    relationship_type="produced",
+                    confidence=profile.confidence,
+                    note="source adapter produced profile URL",
                 )
                 connection.execute(
                     """
@@ -1569,6 +1609,45 @@ class CaseStore:
             ),
         )
 
+    def _ensure_entity_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        entity_type: str,
+        value: str,
+        note: str,
+    ) -> EntityRecord:
+        cleaned_type = entity_type.strip().lower()
+        cleaned_value = value.strip()
+        if not cleaned_value:
+            raise ValueError("Entity value cannot be empty.")
+        row = connection.execute(
+            """
+            SELECT entity_id, entity_type, value, note, created_at
+            FROM entities
+            WHERE entity_type = ? AND value = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (cleaned_type, cleaned_value),
+        ).fetchone()
+        if row is not None:
+            return EntityRecord(
+                entity_id=row["entity_id"],
+                entity_type=row["entity_type"],
+                value=row["value"],
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+
+        record = self._entity_record(cleaned_type, cleaned_value, note)
+        self._insert_entity(connection, record)
+        self._insert_timeline_event(
+            connection,
+            "entity.created",
+            f"Created {record.entity_type} entity {record.value}",
+        )
+        return record
+
     def _insert_relationship(
         self,
         connection: sqlite3.Connection,
@@ -1617,6 +1696,48 @@ class CaseStore:
             f"Created {record.relationship_type} relationship",
         )
         return record
+
+    def _ensure_relationship_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_entity_id: str,
+        target_entity_id: str,
+        relationship_type: str,
+        confidence: str,
+        note: str,
+    ) -> RelationshipRecord:
+        row = connection.execute(
+            """
+            SELECT relationship_id, source_entity_id, target_entity_id,
+                   relationship_type, confidence, note, created_at
+            FROM relationships
+            WHERE source_entity_id = ?
+              AND target_entity_id = ?
+              AND relationship_type = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (source_entity_id, target_entity_id, relationship_type),
+        ).fetchone()
+        if row is not None:
+            return RelationshipRecord(
+                relationship_id=row["relationship_id"],
+                source_entity_id=row["source_entity_id"],
+                target_entity_id=row["target_entity_id"],
+                relationship_type=row["relationship_type"],
+                confidence=row["confidence"],
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+        return self._insert_relationship(
+            connection,
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            confidence=confidence,
+            note=note,
+        )
 
     def _insert_findings(
         self,
@@ -2154,6 +2275,20 @@ def _variant_confidence(variant: UsernameVariant) -> str:
     if variant.confidence is None:
         raise ValueError("Original username variant cannot be related to itself.")
     return variant.confidence
+
+
+def _profile_platform(profile: dict[str, str]) -> str:
+    platform = (profile.get("platform") or "").strip().lower()
+    if platform:
+        return platform
+    parsed = urlparse((profile.get("profile_url") or "").strip())
+    host = parsed.hostname or "unknown"
+    parts = [part for part in host.split(".") if part and part != "www"]
+    if len(parts) >= 2:
+        return parts[-2].lower()
+    if parts:
+        return parts[0].lower()
+    return "unknown"
 
 
 def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_FindingInput]:
