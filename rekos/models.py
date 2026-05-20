@@ -172,6 +172,7 @@ class InvestigationSummaryRecord:
 @dataclass(frozen=True)
 class SourceInvestigationErrorRecord:
     source: str
+    status: str
     error: str
 
 

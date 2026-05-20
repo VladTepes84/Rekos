@@ -7,10 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter, WmnUsernameAdapter
+from .adapters import (
+    AdapterResult,
+    BaseSourceAdapter,
+    MaigretAdapter,
+    SherlockUsernameAdapter,
+    WmnUsernameAdapter,
+    run_adapter_sandboxed,
+)
 from .adapters.registry import default_registry
 from .adapters.web_osint import normalize_domain
-from .errors import ExternalToolExecutionError, ExternalToolMissingError, RekosError
+from .errors import RekosError
 from .osint import _safe_name, _write_export
 from .snapshots import normalize_public_url
 from .storage import CaseStore
@@ -31,6 +38,7 @@ class ProfileFinding:
 @dataclass(frozen=True)
 class SourceInvestigationFailure:
     source: str
+    status: str
     error: str
 
 
@@ -53,6 +61,13 @@ class MultiSourceInvestigationResult:
     failures: list[SourceInvestigationFailure]
 
 
+@dataclass(frozen=True)
+class _ProfileCandidate:
+    variant: UsernameVariant
+    export_path: Path
+    result: AdapterResult
+
+
 def investigate_username(
     case: str,
     username: str,
@@ -64,6 +79,7 @@ def investigate_username(
 
     profiles: list[ProfileFinding] = []
     seen_profiles: set[tuple[str, str]] = set()
+    profile_candidates: list[_ProfileCandidate] = []
     attempted_runs: set[tuple[str, str]] = set()
     sources_run = 0
     skipped_count = 0
@@ -76,7 +92,7 @@ def investigate_username(
             if adapter.name == "sherlock_username" and not _is_safe_sherlock_username(run_target):
                 skipped_count += 1
                 message = _clean_sherlock_failure_message(adapter.name, run_target)
-                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                failures.append(SourceInvestigationFailure(source=adapter.name, status="skipped", error=message))
                 store.add_timeline_event(
                     case,
                     "source.skipped",
@@ -86,69 +102,68 @@ def investigate_username(
             if (adapter.name, run_target) in attempted_runs:
                 continue
             attempted_runs.add((adapter.name, run_target))
-            try:
-                raw_output = adapter.run(case, run_target)
-            except ExternalToolMissingError as exc:
-                if adapter.name == "sherlock_username":
-                    raise
-                if adapter.name in skipped_missing_sources:
-                    continue
-                skipped_missing_sources.add(adapter.name)
-                skipped_count += 1
-                message = f"Missing dependencies for {adapter.name}: {exc}"
-                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
-                store.add_timeline_event(
-                    case,
-                    "source.skipped",
-                    f"Skipped source {adapter.name}: {exc}",
-                )
-                continue
-            except ExternalToolExecutionError as exc:
-                failed_count += 1
-                if adapter.name == "maigret_username":
-                    message = str(exc)
+            runtime = run_adapter_sandboxed(adapter, case, run_target)
+            if runtime.status != "available":
+                if runtime.status == "skipped":
+                    if adapter.name in skipped_missing_sources:
+                        continue
+                    skipped_missing_sources.add(adapter.name)
+                    skipped_count += 1
                 else:
-                    message = _clean_sherlock_failure_message(adapter.name, variant.value)
-                failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+                    failed_count += 1
+                message = _runtime_failure_message(adapter.name, variant.value, runtime.status, runtime.error)
+                failures.append(
+                    SourceInvestigationFailure(
+                        source=adapter.name,
+                        status=runtime.status,
+                        error=message,
+                    )
+                )
+                if runtime.raw_output or runtime.error:
+                    failure_log = _failure_log(runtime.status, message, runtime.raw_output)
+                    _write_export(exports_folder, _export_stem(adapter, run_target), failure_log)
+                    adapter._write_source_output(case, run_target, store, failure_log)
+                event_type = "source.skipped" if runtime.status == "skipped" else "source.failed"
                 store.add_timeline_event(
                     case,
-                    "source.failed",
-                    f"Source {adapter.name} failed for username variant: {message}",
+                    event_type,
+                    f"Source {adapter.name} {runtime.status} for username variant: {message}",
                 )
                 continue
             export_path = _write_export(
                 exports_folder,
                 _export_stem(adapter, run_target),
-                raw_output,
+                runtime.raw_output,
             )
-            source_export_path = adapter._write_source_output(case, run_target, store, raw_output)
-            adapter_results = [
-                _with_confidence(result, profile_confidence(variant))
-                for result in adapter.parse_results(run_target, raw_output)
-            ]
-            normalized_results = [
-                _with_url(result, _normalize_profile_url(result.url))
-                for result in adapter_results
-            ]
-            store.add_adapter_results(case, normalized_results)
-            for result in adapter_results:
-                normalized_url = _normalize_profile_url(result.url)
-                key = (variant.value, normalized_url)
-                if key in seen_profiles:
-                    continue
-                seen_profiles.add(key)
-                profiles.append(
-                    ProfileFinding(
-                        source_username=variant.value,
-                        profile_url=normalized_url,
-                        confidence=result.confidence,
+            source_export_path = adapter._write_source_output(case, run_target, store, runtime.raw_output)
+            for result in runtime.parsed_results:
+                profile_candidates.append(
+                    _ProfileCandidate(
+                        variant=variant,
                         export_path=source_export_path,
-                        source=result.source,
-                        platform=result.platform,
-                        raw_reference=result.raw_reference,
+                        result=_with_url(result, _normalize_profile_url(result.url)),
                     )
                 )
             sources_run += 1
+
+    normalized_results = _apply_username_confidence_model(profile_candidates)
+    store.add_adapter_results(case, normalized_results)
+    for candidate, result in zip(profile_candidates, normalized_results):
+        key = (candidate.variant.value, result.url)
+        if key in seen_profiles:
+            continue
+        seen_profiles.add(key)
+        profiles.append(
+            ProfileFinding(
+                source_username=candidate.variant.value,
+                profile_url=result.url,
+                confidence=result.confidence,
+                export_path=candidate.export_path,
+                source=result.source,
+                platform=result.platform,
+                raw_reference=result.raw_reference,
+            )
+        )
 
     store.add_username_investigation(
         case,
@@ -175,7 +190,7 @@ def investigate_username(
         len(profiles),
         skipped_count,
         failed_count,
-        [(failure.source, failure.error) for failure in failures],
+        [(failure.source, failure.status, failure.error) for failure in failures],
     )
     return UsernameInvestigationResult(
         username=variants[0].value,
@@ -215,6 +230,116 @@ def profile_confidence(variant: UsernameVariant) -> str:
     if variant.confidence in {"high", "medium"}:
         return "medium"
     return "low"
+
+
+def _apply_username_confidence_model(candidates: list[_ProfileCandidate]) -> list[AdapterResult]:
+    url_sources: dict[str, set[str]] = {}
+    username_sources: dict[str, set[str]] = {}
+    username_urls: dict[str, set[str]] = {}
+    for candidate in candidates:
+        result = candidate.result
+        url_key = result.url.strip().lower()
+        source = result.source
+        url_sources.setdefault(url_key, set()).add(source)
+        profile_username = _profile_username_from_url(result.url)
+        if profile_username:
+            username_key = _normalize_username_key(profile_username)
+            username_sources.setdefault(username_key, set()).add(source)
+            username_urls.setdefault(username_key, set()).add(url_key)
+
+    modeled: list[AdapterResult] = []
+    for candidate in candidates:
+        result = candidate.result
+        url_key = result.url.strip().lower()
+        profile_username = _profile_username_from_url(result.url)
+        username_key = _normalize_username_key(profile_username)
+        exact_url_sources = url_sources.get(url_key, set())
+        same_username_sources = username_sources.get(username_key, set()) if username_key else set()
+        same_username_urls = username_urls.get(username_key, set()) if username_key else set()
+        confidence = _confidence_from_internal_score(
+            candidate,
+            exact_url_sources=exact_url_sources,
+            same_username_sources=same_username_sources,
+            same_username_urls=same_username_urls,
+        )
+        modeled.append(_with_confidence(result, confidence))
+    return modeled
+
+
+def _confidence_from_internal_score(
+    candidate: _ProfileCandidate,
+    *,
+    exact_url_sources: set[str],
+    same_username_sources: set[str],
+    same_username_urls: set[str],
+) -> str:
+    result = candidate.result
+    score = _variant_confidence_score(candidate.variant)
+
+    if result.source in {"sherlock", "sherlock_username", "maigret", "maigret_username"}:
+        score += 5
+    if result.source == "wmn_username":
+        score -= 30
+    if _raw_reference_is_weak_template(result.raw_reference):
+        score -= 15
+
+    exact_url_confirmed = len(exact_url_sources) > 1
+    same_username_different_urls = (
+        not exact_url_confirmed
+        and len(same_username_sources) > 1
+        and len(same_username_urls) > 1
+    )
+    if exact_url_confirmed:
+        score += 35
+    elif same_username_different_urls:
+        score += 12
+
+    if result.source == "wmn_username" and not exact_url_confirmed:
+        score = min(score, 44)
+    if same_username_different_urls:
+        score = min(score, 65)
+
+    if score >= 75:
+        return "high"
+    if score >= 45:
+        return "medium"
+    return "low"
+
+
+def _variant_confidence_score(variant: UsernameVariant) -> int:
+    if variant.confidence is None:
+        return 70
+    if variant.confidence == "high":
+        return 55
+    if variant.confidence == "medium":
+        return 50
+    return 25
+
+
+def _profile_username_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return ""
+    return parts[-1].lstrip("@")
+
+
+def _normalize_username_key(username: str) -> str:
+    return username.strip().lower().lstrip("@")
+
+
+def _raw_reference_is_weak_template(raw_reference: str) -> bool:
+    lowered = raw_reference.lower()
+    return (
+        "template hit" in lowered
+        or "ambiguous" in lowered
+        or "redirect" in lowered
+        or "blocked" in lowered
+        or "rate-limit" in lowered
+        or "rate limited" in lowered
+    )
 
 
 def _with_confidence(result: AdapterResult, confidence: str) -> AdapterResult:
@@ -265,6 +390,25 @@ def _clean_sherlock_failure_message(source: str, target: str) -> str:
     return f"{source} failed for {target}: upstream tool error"
 
 
+def _runtime_failure_message(source: str, target: str, status: str, error: str) -> str:
+    if status == "skipped":
+        if "Missing dependencies" not in error:
+            return f"Missing dependencies for {source}: {error}"
+        return error
+    if source in {"sherlock", "sherlock_username"}:
+        if status == "timeout":
+            return f"{source} timed out for {target}: upstream tool timeout"
+        return _clean_sherlock_failure_message(source, target)
+    return error or f"{source} {status} for {target}"
+
+
+def _failure_log(status: str, error: str, raw_output: str) -> str:
+    sections = [f"Status: {status}", f"Error: {error}"]
+    if raw_output.strip():
+        sections.extend(["", "Raw output:", raw_output.strip()])
+    return "\n".join(sections).rstrip() + "\n"
+
+
 def _normalize_profile_url(url: str) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -304,7 +448,7 @@ def _investigate_sources(
             adapter = registry.get(source_name)
         except RekosError as exc:
             skipped_count += 1
-            failures.append(SourceInvestigationFailure(source=source_name, error=str(exc)))
+            failures.append(SourceInvestigationFailure(source=source_name, status="skipped", error=str(exc)))
             store.add_timeline_event(case, "source.skipped", f"Skipped source {source_name}: {exc}")
             continue
 
@@ -312,14 +456,14 @@ def _investigate_sources(
         if missing:
             skipped_count += 1
             message = f"Missing dependencies: {', '.join(missing)}"
-            failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+            failures.append(SourceInvestigationFailure(source=adapter.name, status="skipped", error=message))
             store.add_timeline_event(case, "source.skipped", f"Skipped source {adapter.name}: {message}")
             continue
 
         try:
             result = adapter.execute(case, target, store)
         except (OSError, RekosError, ValueError) as exc:
-            failures.append(SourceInvestigationFailure(source=adapter.name, error=str(exc)))
+            failures.append(SourceInvestigationFailure(source=adapter.name, status="failed", error=str(exc)))
             store.add_timeline_event(case, "source.failed", f"Source {adapter.name} failed: {exc}")
             continue
         sources_run += 1
@@ -334,7 +478,7 @@ def _investigate_sources(
         result_count,
         skipped_count,
         failed_count,
-        [(failure.source, failure.error) for failure in failures],
+        [(failure.source, failure.status, failure.error) for failure in failures],
     )
     return MultiSourceInvestigationResult(
         target_type=target_type,

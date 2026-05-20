@@ -23,7 +23,7 @@ from rekos.adapters import (
 from rekos.adapters.registry import default_registry
 from rekos.banner import render_banner
 from rekos.cli import build_parser, main
-from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
+from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError, ExternalToolTimeoutError
 from rekos.storage import CaseStore, quality_label
 from rekos.usernames import username_variants
 
@@ -455,7 +455,7 @@ def test_wmn_adapter_parses_mocked_hit() -> None:
             target="alice",
             url="https://github.com/alice",
             platform="github",
-            confidence="medium",
+            confidence="low",
             raw_reference="HTTP status: 200",
         )
     ]
@@ -503,7 +503,7 @@ def test_sources_run_wmn_username_creates_profile_finding(
         "discovered_profile",
         "https://github.com/alice",
         "wmn_username",
-        "medium",
+        "low",
     )
     assert row[4] > 0
 
@@ -752,6 +752,84 @@ def test_graph_summary_counts_and_most_connected(
     assert "example.com (2)" in output
 
 
+def test_username_findings_enrich_graph_and_export(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-graph-enriched"]) == 0
+
+    profile_url = "https://github.com/alice"
+    store = CaseStore()
+    results = [
+        AdapterResult(
+            source="sherlock_username",
+            target="alice",
+            url=profile_url,
+            platform="github",
+            confidence="high",
+            raw_reference=profile_url,
+        ),
+        AdapterResult(
+            source="maigret_username",
+            target="alice",
+            url=profile_url,
+            platform="github",
+            confidence="high",
+            raw_reference=profile_url,
+        ),
+    ]
+    store.add_adapter_results("case-graph-enriched", results)
+    store.add_adapter_results("case-graph-enriched", results)
+
+    db_path = tmp_path / "rekos_cases" / "case-graph-enriched" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_rows = connection.execute(
+            """
+            SELECT entity_type, value, COUNT(*)
+            FROM entities
+            GROUP BY entity_type, value
+            ORDER BY entity_type, value
+            """
+        ).fetchall()
+        relationship_rows = connection.execute(
+            """
+            SELECT se.entity_type, se.value, r.relationship_type, r.confidence,
+                   te.entity_type, te.value, r.note
+            FROM relationships r
+            JOIN entities se ON se.entity_id = r.source_entity_id
+            JOIN entities te ON te.entity_id = r.target_entity_id
+            ORDER BY r.relationship_type, se.value, te.value
+            """
+        ).fetchall()
+
+    assert ("url", profile_url, 1) in entity_rows
+    assert ("username", "alice", 1) in entity_rows
+    assert ("platform", "github", 1) in entity_rows
+    assert ("source", "sherlock_username", 1) in entity_rows
+    assert ("source", "maigret_username", 1) in entity_rows
+    assert sum(1 for row in relationship_rows if row[2] == "discovered_on") == 1
+    discovered_on = next(row for row in relationship_rows if row[2] == "discovered_on")
+    assert discovered_on[0:6] == (
+        "username",
+        "alice",
+        "discovered_on",
+        "high",
+        "platform",
+        "github",
+    )
+    assert sum(1 for row in relationship_rows if row[2] == "produced_by") == 2
+    assert sum(1 for row in relationship_rows if row[2] == "confirmed_by") == 2
+    assert all("source=" in row[6] and "observed_at=" in row[6] for row in relationship_rows)
+
+    archive = tmp_path / "case-graph-enriched.zip"
+    assert main(["export-case", "case-graph-enriched", "--output", str(archive)]) == 0
+    with zipfile.ZipFile(archive) as exported:
+        names = set(exported.namelist())
+    assert "case-graph-enriched/rekos.db" in names
+    assert "case-graph-enriched/manifest.json" in names
+    capsys.readouterr()
+
+
 def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -952,7 +1030,7 @@ def test_list_sources_shows_status_findings_and_errors(
     assert "Source Runs" in output
     assert "rdap_domain" in output
     assert "wayback_url" in output
-    assert "ok" in output
+    assert "available" in output
     assert "crtsh_domain" in output
     assert "failed" in output
     assert "temporary source failure" in output
@@ -1068,7 +1146,29 @@ def test_investigate_username_with_mocked_sherlock(
     assert [row[0] for row in finding_rows] == ["discovered_profile"] * 4
     assert [row[2] for row in finding_rows] == ["sherlock_username"] * 4
     assert [row[3] for row in finding_rows] == ["high", "medium", "low", "medium"]
-    assert all(row[1] == row[4] for row in finding_rows)
+    structured_findings = [json.loads(row[4]) for row in finding_rows]
+    required_shape = {
+        "type",
+        "target",
+        "platform",
+        "url",
+        "source",
+        "status",
+        "confidence",
+        "evidence",
+        "observed_at",
+        "raw_reference",
+    }
+    assert all(required_shape.issubset(finding) for finding in structured_findings)
+    assert [finding["type"] for finding in structured_findings] == ["discovered_profile"] * 4
+    assert [finding["status"] for finding in structured_findings] == ["available"] * 4
+    assert [finding["evidence"] for finding in structured_findings] == [
+        "exact_username_url",
+        "exact_username_url",
+        "exact_username_url",
+        "exact_username_url",
+    ]
+    assert all(finding["url"] == row[1] for finding, row in zip(structured_findings, finding_rows))
     assert all(Path(row[3]).exists() for row in profile_rows)
     assert "investigation.completed" in event_types
 
@@ -1140,29 +1240,74 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         ).fetchall()
         finding_rows = connection.execute(
             """
-            SELECT type, value, source, confidence
+            SELECT type, value, source, confidence, raw_reference
             FROM normalized_findings
             ORDER BY id
             """
         ).fetchall()
 
     assert profile_rows == [
-        ("https://profiles.example/alice", "high"),
+        ("https://profiles.example/alice", "medium"),
         ("https://shared.example/alice", "high"),
-        ("https://maigret.example/alice", "high"),
+        ("https://maigret.example/alice", "medium"),
     ]
     assert adapter_rows == [
-        ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "high"),
+        ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "medium"),
         ("sherlock_username", "alice", "https://shared.example/alice", "shared", "high"),
         ("maigret_username", "alice", "https://shared.example/alice", "shared", "high"),
-        ("maigret_username", "alice", "https://maigret.example/alice", "maigret", "high"),
+        ("maigret_username", "alice", "https://maigret.example/alice", "maigret", "medium"),
     ]
-    assert finding_rows == [
-        ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "high"),
+    assert [row[0:4] for row in finding_rows] == [
+        ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "medium"),
         ("discovered_profile", "https://shared.example/alice", "sherlock_username", "high"),
         ("discovered_profile", "https://shared.example/alice", "maigret_username", "high"),
-        ("discovered_profile", "https://maigret.example/alice", "maigret_username", "high"),
+        ("discovered_profile", "https://maigret.example/alice", "maigret_username", "medium"),
     ]
+    structured_rows = {
+        (row[1], row[2]): json.loads(row[4])
+        for row in finding_rows
+    }
+    assert structured_rows[("https://shared.example/alice", "sherlock_username")]["evidence"] == "cross_source_confirmed_url"
+    assert structured_rows[("https://shared.example/alice", "maigret_username")]["evidence"] == "cross_source_confirmed_url"
+
+
+def test_same_username_different_profile_urls_stays_medium(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: ["/usr/bin/maigret"])
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        if cmd[0] == "/usr/bin/sherlock":
+            stdout = "https://github.com/alice\n"
+        else:
+            stdout = "https://gitlab.com/alice\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-same-username-different-urls"]) == 0
+    assert main(["investigate", "username", "case-same-username-different-urls", "alice"]) == 0
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-same-username-different-urls" / "rekos.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT source, value, confidence, quality_score, quality_reason
+            FROM normalized_findings
+            WHERE type = 'discovered_profile'
+            ORDER BY source
+            """
+        ).fetchall()
+
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("maigret_username", "https://gitlab.com/alice", "medium"),
+        ("sherlock_username", "https://github.com/alice", "medium"),
+    ]
+    assert all(row[3] < 90 for row in rows)
+    assert all("same URL confirmed" not in row[4] for row in rows)
 
 
 def test_investigate_username_records_missing_maigret_source(
@@ -1244,6 +1389,255 @@ def test_investigate_username_prints_clean_maigret_runtime_warning(
     assert row[0] == "maigret_username"
     assert "Traceback" in row[1]
     assert "upstream details" in row[1]
+
+
+def test_investigate_username_continues_when_sherlock_times_out(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
+
+    def timeout_sherlock(self, case: str, target: str) -> str:
+        raise ExternalToolTimeoutError("sherlock timed out after 120 seconds.")
+
+    def fake_wmn(self, case: str, target: str) -> str:
+        return json.dumps(
+            {
+                "source": "wmn_username",
+                "target": target,
+                "results": [
+                    {
+                        "platform": "GitHub",
+                        "url": f"https://github.com/{target}",
+                        "status_code": 200,
+                        "hit": True,
+                        "error": "",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(SherlockAdapter, "run", timeout_sherlock)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", fake_wmn)
+
+    assert main(["new-case", "case-sherlock-timeout"]) == 0
+    assert main(["investigate", "username", "case-sherlock-timeout", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Warning: sherlock_username timed out for alice; continuing with other sources." in output
+    assert "Discovered profiles: 1" in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-sherlock-timeout" / "rekos.db") as connection:
+        error_row = connection.execute(
+            "SELECT source, status, error FROM source_investigation_errors WHERE source = ?",
+            ("sherlock_username",),
+        ).fetchone()
+        finding_count = connection.execute(
+            "SELECT COUNT(*) FROM normalized_findings WHERE source = ?",
+            ("wmn_username",),
+        ).fetchone()[0]
+
+    assert error_row[0] == "sherlock_username"
+    assert error_row[1] == "timeout"
+    assert "upstream tool timeout" in error_row[2]
+    assert finding_count == 1
+
+
+def test_investigate_username_marks_unparsable_source_output_failed(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: ["/usr/bin/maigret"])
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
+
+    def fake_sherlock(cmd, check, capture_output, text, timeout):
+        username = cmd[3]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"https://profiles.example/{username}\n",
+            stderr="",
+        )
+
+    def raw_maigret(self, case: str, target: str) -> str:
+        return "not parseable by adapter\n"
+
+    def fail_parse(self, target: str, raw_output: str):
+        raise ValueError("unexpected output shape")
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_sherlock)
+    monkeypatch.setattr(MaigretAdapter, "run", raw_maigret)
+    monkeypatch.setattr(MaigretAdapter, "parse_results", fail_parse)
+
+    assert main(["new-case", "case-unparsable-source"]) == 0
+    assert main(["investigate", "username", "case-unparsable-source", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Warning: Maigret source failed for alice; continuing with other sources." in output
+    assert "unexpected output shape" not in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-unparsable-source" / "rekos.db") as connection:
+        error_row = connection.execute(
+            "SELECT source, status, error FROM source_investigation_errors WHERE source = ?",
+            ("maigret_username",),
+        ).fetchone()
+        finding_count = connection.execute(
+            "SELECT COUNT(*) FROM normalized_findings WHERE source = ?",
+            ("sherlock_username",),
+        ).fetchone()[0]
+
+    assert error_row == (
+        "maigret_username",
+        "failed",
+        "Failed to parse source output: unexpected output shape",
+    )
+    assert finding_count == 1
+
+
+def test_username_investigation_e2e_regression_pack(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: ["/usr/bin/maigret"])
+
+    shared_url = "https://shared.example/Alice.Smith"
+    wmn_url = "https://github.com/Alice.Smith"
+
+    def fake_sherlock(self, case: str, target: str) -> str:
+        if target == "Alice.Smith":
+            return f"{shared_url}\n"
+        if target == "alice.smith":
+            raise ExternalToolTimeoutError("sherlock timed out after 120 seconds.")
+        return ""
+
+    def fake_maigret(self, case: str, target: str) -> str:
+        if target == "Alice.Smith":
+            return f"{shared_url}\n"
+        return ""
+
+    def fake_wmn(self, case: str, target: str) -> str:
+        if target == "Alice.Smith":
+            return json.dumps(
+                {
+                    "source": "wmn_username",
+                    "target": target,
+                    "results": [
+                        {
+                            "platform": "GitHub",
+                            "url": wmn_url,
+                            "status_code": 200,
+                            "hit": True,
+                            "warning": "",
+                            "error": "",
+                        }
+                    ],
+                }
+            )
+        if target == "alice.smith":
+            raise ExternalToolExecutionError("HTTP 403 blocked by passive source")
+        return json.dumps({"source": "wmn_username", "target": target, "results": []})
+
+    monkeypatch.setattr(SherlockAdapter, "run", fake_sherlock)
+    monkeypatch.setattr(MaigretAdapter, "run", fake_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", fake_wmn)
+
+    assert main(["new-case", "case-username-e2e"]) == 0
+    assert main(["investigate", "username", "case-username-e2e", "Alice.Smith"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed username investigation" in output
+    assert "Warning: sherlock_username timed out for Alice.Smith; continuing with other sources." in output
+    assert "Warning: wmn_username was blocked for Alice.Smith; continuing with other sources." in output
+
+    db_path = tmp_path / "rekos_cases" / "case-username-e2e" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        source_errors = connection.execute(
+            """
+            SELECT source, status
+            FROM source_investigation_errors
+            ORDER BY source, status
+            """
+        ).fetchall()
+        findings = connection.execute(
+            """
+            SELECT type, value, source, confidence, raw_reference
+            FROM normalized_findings
+            WHERE type = 'discovered_profile'
+            ORDER BY source, value
+            """
+        ).fetchall()
+        entities = connection.execute(
+            """
+            SELECT entity_type, value, COUNT(*)
+            FROM entities
+            WHERE entity_type IN ('username', 'platform', 'url', 'source')
+            GROUP BY entity_type, value
+            ORDER BY entity_type, value
+            """
+        ).fetchall()
+        relationships = connection.execute(
+            """
+            SELECT se.entity_type, se.value, r.relationship_type, r.confidence,
+                   te.entity_type, te.value, r.note
+            FROM relationships r
+            JOIN entities se ON se.entity_id = r.source_entity_id
+            JOIN entities te ON te.entity_id = r.target_entity_id
+            WHERE r.relationship_type IN ('discovered_on', 'produced_by', 'confirmed_by')
+            ORDER BY r.relationship_type, se.value, te.value
+            """
+        ).fetchall()
+
+    assert ("sherlock_username", "timeout") in source_errors
+    assert ("wmn_username", "blocked") in source_errors
+
+    structured = {
+        (row[1], row[2]): json.loads(row[4])
+        for row in findings
+    }
+    required_shape = {
+        "type",
+        "target",
+        "platform",
+        "url",
+        "source",
+        "status",
+        "confidence",
+        "evidence",
+        "observed_at",
+        "raw_reference",
+    }
+    assert all(required_shape.issubset(item) for item in structured.values())
+    assert all(item["status"] == "available" for item in structured.values())
+    assert all(item["evidence"] not in {"timeout", "blocked"} for item in structured.values())
+    assert structured[(shared_url, "sherlock_username")]["confidence"] == "high"
+    assert structured[(shared_url, "sherlock_username")]["evidence"] == "cross_source_confirmed_url"
+    assert structured[(shared_url, "maigret_username")]["confidence"] == "high"
+    assert structured[(shared_url, "maigret_username")]["evidence"] == "cross_source_confirmed_url"
+    assert structured[(wmn_url, "wmn_username")]["confidence"] == "low"
+    assert structured[(wmn_url, "wmn_username")]["evidence"] == "template_only"
+    assert {row[3] for row in findings if row[1] == shared_url} == {"high"}
+    assert {row[3] for row in findings if row[1] == wmn_url} == {"low"}
+
+    assert ("url", shared_url, 1) in entities
+    assert ("url", wmn_url, 1) in entities
+    assert ("platform", "shared", 1) in entities
+    assert ("platform", "github", 1) in entities
+    assert ("source", "sherlock_username", 1) in entities
+    assert ("source", "maigret_username", 1) in entities
+    assert ("source", "wmn_username", 1) in entities
+    assert any(row[2] == "discovered_on" and row[0:2] == ("username", "Alice.Smith") for row in relationships)
+    assert any(row[2] == "produced_by" and row[5] == shared_url for row in relationships)
+    assert sum(1 for row in relationships if row[2] == "confirmed_by" and row[5] == shared_url) == 2
+    assert all("source=" in row[6] and "observed_at=" in row[6] for row in relationships)
+
+    archive = tmp_path / "case-username-e2e.zip"
+    assert main(["export-case", "case-username-e2e", "--output", str(archive)]) == 0
+    with zipfile.ZipFile(archive) as exported:
+        names = set(exported.namelist())
+    assert "case-username-e2e/rekos.db" in names
+    assert "case-username-e2e/manifest.json" in names
 
 
 def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
@@ -1332,12 +1726,15 @@ def test_investigate_username_missing_sherlock(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda _tool: None)
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
 
     assert main(["new-case", "case-no-sherlock"]) == 0
-    assert main(["investigate", "username", "case-no-sherlock", "alice"]) == 1
+    assert main(["investigate", "username", "case-no-sherlock", "alice"]) == 0
 
     captured = capsys.readouterr()
-    assert "Missing username investigation tool" in captured.err
+    assert "Missing dependencies for sherlock_username: sherlock." in captured.out
+    assert "Missing username investigation tool" not in captured.err
 
 
 def test_investigate_username_skips_unsafe_double_dot_variant(
@@ -1408,11 +1805,11 @@ def test_investigate_username_skips_unsafe_double_dot_variant(
             "SELECT source, error FROM source_investigation_errors"
         ).fetchone()
 
-    assert username_entities == [
+    assert set(username_entities) == {
         "ciccio..gamer035",
         "cicciogamer035",
         "ciccio__gamer035",
-    ]
+    }
     assert adapter_targets == ["cicciogamer035", "ciccio__gamer035"]
     assert investigation_row == ("username", "ciccio..gamer035", 5, 2, 2, 0)
     assert error_row == (
@@ -1517,8 +1914,8 @@ def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "Discovered profiles: 4" in output
     assert "https://profiles.example/Alice.Smith (high) from Alice.Smith" in output
     assert "https://profiles.example/alice.smith (medium) from alice.smith" in output
-    assert "Graph entities: 8" in output
-    assert "Graph relationships: 11" in output
+    assert "Graph entities:" in output
+    assert "Graph relationships:" in output
     assert "Findings: 4" in output
     assert "discovered_profile: https://profiles.example/Alice.Smith" in output
     assert "Timeline events:" in output

@@ -564,8 +564,15 @@ def console_main() -> None:
 
 
 def _username_failure_warning(failure: SourceInvestigationFailure, username: str) -> str:
-    if failure.source == "maigret_username" and not failure.error.startswith("Missing dependencies"):
+    if failure.source == "maigret_username" and failure.status != "skipped":
         return f"Maigret source failed for {username}; continuing with other sources."
+    if failure.status == "timeout":
+        return f"{failure.source} timed out for {username}; continuing with other sources."
+    if failure.status in {"rate_limited", "blocked"}:
+        label = failure.status.replace("_", " ")
+        return f"{failure.source} was {label} for {username}; continuing with other sources."
+    if failure.status == "failed" and not failure.error.startswith("sherlock_username failed"):
+        return f"{failure.source} failed for {username}; continuing with other sources."
     return failure.error
 
 

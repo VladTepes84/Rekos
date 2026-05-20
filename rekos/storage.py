@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,7 +44,18 @@ from .usernames import UsernameVariant, username_variants
 
 
 ALLOWED_TARGET_TYPES = {"username"}
-ALLOWED_ENTITY_TYPES = {"username", "email", "domain", "url", "ip", "phone", "file", "note"}
+ALLOWED_ENTITY_TYPES = {
+    "username",
+    "email",
+    "domain",
+    "url",
+    "ip",
+    "phone",
+    "file",
+    "note",
+    "platform",
+    "source",
+}
 ALLOWED_RELATIONSHIP_TYPES = {
     "related_to",
     "possible_match",
@@ -51,6 +63,9 @@ ALLOWED_RELATIONSHIP_TYPES = {
     "referenced_by",
     "extracted_from",
     "discovered_from",
+    "discovered_on",
+    "produced_by",
+    "confirmed_by",
 }
 ALLOWED_CONFIDENCES = {"low", "medium", "high"}
 SEARCH_TYPES = {"entity", "finding", "evidence", "timeline", "note", "relationship"}
@@ -90,6 +105,7 @@ class _ScoreContext:
     adapter_targets: dict[tuple[str, str], set[str]]
     source_runs: dict[str, int]
     source_errors: dict[str, int]
+    source_statuses: dict[str, set[str]]
     value_sources: dict[str, set[str]]
     evidence_values: set[str]
     relationship_counts: dict[str, int]
@@ -449,11 +465,6 @@ class CaseStore:
             raise ValueError("Investigation requires at least one username variant.")
 
         created_at = utc_now_iso()
-        original_record = self._entity_record("username", variants[0].value, "investigation username")
-        variant_records = [
-            self._entity_record("username", variant.value, "investigation username variant")
-            for variant in variants[1:]
-        ]
         profile_records = [
             InvestigationProfileRecord(
                 source_username=profile["source_username"],
@@ -466,22 +477,22 @@ class CaseStore:
         ]
 
         with self.connection_for_case(case) as connection:
-            self._insert_entity(connection, original_record)
-            self._insert_timeline_event(
+            original_record = self._ensure_entity_in_connection(
                 connection,
-                "entity.created",
-                f"Created investigation username entity {original_record.value}",
+                "username",
+                variants[0].value,
+                "investigation username",
             )
             username_entities = {original_record.value: original_record}
-            for variant, record in zip(variants[1:], variant_records):
-                self._insert_entity(connection, record)
-                username_entities[record.value] = record
-                self._insert_timeline_event(
+            for variant in variants[1:]:
+                record = self._ensure_entity_in_connection(
                     connection,
-                    "entity.created",
-                    f"Created investigation username variant entity {record.value}",
+                    "username",
+                    variant.value,
+                    "investigation username variant",
                 )
-                self._insert_relationship(
+                username_entities[record.value] = record
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=original_record.entity_id,
                     target_entity_id=record.entity_id,
@@ -500,19 +511,14 @@ class CaseStore:
             investigation_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
 
             for profile in profile_records:
-                profile_entity = self._entity_record(
+                profile_entity = self._ensure_entity_in_connection(
+                    connection,
                     "url",
                     profile.profile_url,
                     f"profile discovered from {profile.source_username}",
                 )
-                self._insert_entity(connection, profile_entity)
-                self._insert_timeline_event(
-                    connection,
-                    "entity.created",
-                    f"Created profile URL entity {profile.profile_url}",
-                )
                 source_entity = username_entities[profile.source_username]
-                self._insert_relationship(
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=source_entity.entity_id,
                     target_entity_id=profile_entity.entity_id,
@@ -520,7 +526,7 @@ class CaseStore:
                     confidence=profile.confidence,
                     note="profile URL discovered by username investigation",
                 )
-                self._insert_relationship(
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=original_record.entity_id,
                     target_entity_id=profile_entity.entity_id,
@@ -577,7 +583,7 @@ class CaseStore:
         result_count: int,
         skipped_count: int,
         failed_count: int,
-        errors: list[tuple[str, str]],
+        errors: list[tuple[str, str, str]],
     ) -> SourceInvestigationRecord:
         cleaned_type = target_type.strip().lower()
         cleaned_target = target.strip()
@@ -588,8 +594,8 @@ class CaseStore:
 
         created_at = utc_now_iso()
         error_records = [
-            SourceInvestigationErrorRecord(source=source, error=error)
-            for source, error in errors
+            SourceInvestigationErrorRecord(source=source, status=status, error=error)
+            for source, status, error in errors
         ]
         with self.connection_for_case(case) as connection:
             connection.execute(
@@ -621,12 +627,13 @@ class CaseStore:
                 INSERT INTO source_investigation_errors (
                     investigation_id,
                     source,
+                    status,
                     error
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?)
                 """,
                 [
-                    (investigation_id, error.source, error.error)
+                    (investigation_id, error.source, error.status, error.error)
                     for error in error_records
                 ],
             )
@@ -698,6 +705,7 @@ class CaseStore:
                 connection,
                 _findings_from_adapter_results(results),
             )
+            self._enrich_graph_from_username_findings(connection, results, created_at)
         return records
 
     def findings(self, case: str, *, refresh_scores: bool = False) -> list[FindingRecord]:
@@ -795,7 +803,7 @@ class CaseStore:
                 SourceRunRecord(
                     source=row["source"],
                     target=row["target"],
-                    status="ok",
+                    status="available",
                     findings_count=finding_counts.get(row["source"], 0),
                     error="",
                     created_at=row["created_at"],
@@ -813,16 +821,14 @@ class CaseStore:
                 SourceRunRecord(
                     source=row["source"],
                     target=row["target"],
-                    status="skipped"
-                    if row["error"].startswith("Missing dependencies:")
-                    else "failed",
+                    status=row["status"],
                     findings_count=finding_counts.get(row["source"], 0),
                     error=row["error"],
                     created_at=row["created_at"],
                 )
                 for row in connection.execute(
                     """
-                    SELECT e.source, e.error, i.target, i.created_at
+                    SELECT e.source, e.status, e.error, i.target, i.created_at
                     FROM source_investigation_errors e
                     JOIN source_investigations i
                         ON i.id = e.investigation_id
@@ -1300,6 +1306,7 @@ class CaseStore:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 investigation_id INTEGER NOT NULL,
                 source TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'failed',
                 error TEXT NOT NULL,
                 FOREIGN KEY (investigation_id) REFERENCES source_investigations (id)
             );
@@ -1328,6 +1335,12 @@ class CaseStore:
             "normalized_findings",
             "quality_reason",
             "TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            connection,
+            "source_investigation_errors",
+            "status",
+            "TEXT NOT NULL DEFAULT 'failed'",
         )
 
     def _load_entities(self, connection: sqlite3.Connection) -> list[EntityRecord]:
@@ -1486,11 +1499,12 @@ class CaseStore:
             errors = [
                 SourceInvestigationErrorRecord(
                     source=error["source"],
+                    status=error["status"],
                     error=error["error"],
                 )
                 for error in connection.execute(
                     """
-                    SELECT source, error
+                    SELECT source, status, error
                     FROM source_investigation_errors
                     WHERE investigation_id = ?
                     ORDER BY id
@@ -1521,16 +1535,30 @@ class CaseStore:
             created_at=utc_now_iso(),
         )
 
-    def _ensure_url_entity(self, connection: sqlite3.Connection, url: str) -> EntityRecord:
+    def _ensure_entity_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        entity_type: str,
+        value: str,
+        note: str,
+    ) -> EntityRecord:
+        cleaned_type = entity_type.strip().lower()
+        cleaned_value = value.strip()
+        cleaned_note = note.strip()
+        if cleaned_type not in ALLOWED_ENTITY_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_ENTITY_TYPES))
+            raise ValueError(f"Unsupported entity type '{entity_type}'. Allowed: {allowed}.")
+        if not cleaned_value:
+            raise ValueError("Entity value cannot be empty.")
         row = connection.execute(
             """
             SELECT entity_id, entity_type, value, note, created_at
             FROM entities
-            WHERE entity_type = 'url' AND value = ?
+            WHERE entity_type = ? AND value = ?
             ORDER BY id
             LIMIT 1
             """,
-            (url,),
+            (cleaned_type, cleaned_value),
         ).fetchone()
         if row is not None:
             return EntityRecord(
@@ -1541,14 +1569,53 @@ class CaseStore:
                 created_at=row["created_at"],
             )
 
-        record = self._entity_record("url", url, "snapshot URL")
+        record = self._entity_record(cleaned_type, cleaned_value, cleaned_note)
         self._insert_entity(connection, record)
         self._insert_timeline_event(
             connection,
             "entity.created",
-            f"Created URL entity {url}",
+            f"Created {record.entity_type} entity {record.value}",
         )
         return record
+
+    def _ensure_url_entity(self, connection: sqlite3.Connection, url: str) -> EntityRecord:
+        return self._ensure_entity_in_connection(connection, "url", url, "snapshot URL")
+
+    def _ensure_relationship_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_entity_id: str,
+        target_entity_id: str,
+        relationship_type: str,
+        confidence: str,
+        note: str,
+    ) -> RelationshipRecord | None:
+        if source_entity_id == target_entity_id:
+            return None
+        row = connection.execute(
+            """
+            SELECT relationship_id, source_entity_id, target_entity_id,
+                   relationship_type, confidence, note, created_at
+            FROM relationships
+            WHERE source_entity_id = ?
+              AND target_entity_id = ?
+              AND relationship_type = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (source_entity_id, target_entity_id, relationship_type),
+        ).fetchone()
+        if row is not None:
+            return None
+        return self._insert_relationship(
+            connection,
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            confidence=confidence,
+            note=note,
+        )
 
     def _insert_entity(
         self,
@@ -1661,6 +1728,91 @@ class CaseStore:
             rows,
         )
         self._score_findings_in_connection(connection)
+
+    def _enrich_graph_from_username_findings(
+        self,
+        connection: sqlite3.Connection,
+        results: list[AdapterResult],
+        created_at: str,
+    ) -> None:
+        profile_results = [
+            result
+            for result in results
+            if result.source in {"sherlock", "sherlock_username", "maigret", "maigret_username", "wmn_username"}
+            and result.url.strip()
+            and result.target.strip()
+        ]
+        if not profile_results:
+            return
+
+        url_sources: dict[str, set[str]] = {}
+        for result in profile_results:
+            url_sources.setdefault(result.url.strip().lower(), set()).add(result.source)
+
+        for result in profile_results:
+            confidence = _normalize_confidence(result.confidence)
+            url_key = result.url.strip().lower()
+            structured = _json_object(
+                _structured_profile_reference(
+                    result,
+                    cross_source_confirmed=len(url_sources.get(url_key, set())) > 1,
+                )
+            )
+            platform_value = (result.platform or _platform_from_url(result.url)).strip().lower()
+            if not platform_value:
+                platform_value = "unknown"
+            observed_at = str(structured.get("observed_at") or created_at)
+            evidence = str(structured.get("evidence") or _profile_evidence_reason(result))
+            username_entity = self._ensure_entity_in_connection(
+                connection,
+                "username",
+                result.target,
+                "username finding target",
+            )
+            platform_entity = self._ensure_entity_in_connection(
+                connection,
+                "platform",
+                platform_value,
+                "profile platform",
+            )
+            url_entity = self._ensure_entity_in_connection(
+                connection,
+                "url",
+                result.url,
+                "discovered profile URL",
+            )
+            source_entity = self._ensure_entity_in_connection(
+                connection,
+                "source",
+                result.source,
+                "passive source adapter",
+            )
+            note = f"source={result.source}; evidence={evidence}; url={result.url}; observed_at={observed_at}"
+            self._ensure_relationship_in_connection(
+                connection,
+                source_entity_id=username_entity.entity_id,
+                target_entity_id=platform_entity.entity_id,
+                relationship_type="discovered_on",
+                confidence=confidence,
+                note=note,
+            )
+            self._ensure_relationship_in_connection(
+                connection,
+                source_entity_id=source_entity.entity_id,
+                target_entity_id=url_entity.entity_id,
+                relationship_type="produced_by",
+                confidence=confidence,
+                note=note,
+            )
+            if len(url_sources.get(url_key, set())) > 1:
+                self._ensure_relationship_in_connection(
+                    connection,
+                    source_entity_id=source_entity.entity_id,
+                    target_entity_id=url_entity.entity_id,
+                    relationship_type="confirmed_by",
+                    confidence=confidence,
+                    note=note,
+                )
 
     def _score_findings_in_connection(self, connection: sqlite3.Connection) -> list[tuple[int, str, str]]:
         findings = self._load_findings(connection)
@@ -1962,6 +2114,14 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
             """
         ).fetchall()
     }
+    source_statuses: dict[str, set[str]] = {}
+    for row in connection.execute(
+        "SELECT source, status FROM source_investigation_errors"
+    ).fetchall():
+        source = row["source"].strip()
+        status = row["status"].strip()
+        if source and status:
+            source_statuses.setdefault(source, set()).add(status)
     value_sources: dict[str, set[str]] = {}
     for row in connection.execute(
         "SELECT value, source FROM normalized_findings"
@@ -1996,6 +2156,7 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
         adapter_targets=adapter_targets,
         source_runs=source_runs,
         source_errors=source_errors,
+        source_statuses=source_statuses,
         value_sources=value_sources,
         evidence_values=evidence_values,
         relationship_counts=relationship_counts,
@@ -2049,6 +2210,16 @@ def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int,
 
     source_run_count = context.source_runs.get(finding.source, 0)
     source_error_count = context.source_errors.get(finding.source, 0)
+    source_statuses = context.source_statuses.get(finding.source, set())
+    if "timeout" in source_statuses:
+        score -= 8
+        reasons.append("source timeout recorded")
+    if "failed" in source_statuses:
+        score -= 6
+        reasons.append("source failure recorded")
+    if "blocked" in source_statuses or "rate_limited" in source_statuses:
+        score -= 12
+        reasons.append("source blocked or rate-limited")
     total_source_events = source_run_count + source_error_count
     if total_source_events:
         error_rate = source_error_count / total_source_events
@@ -2095,6 +2266,14 @@ def _username_from_profile_url(value: str) -> str:
     if not parts:
         return ""
     return unquote(parts[-1])
+
+
+def _platform_from_url(url: str) -> str:
+    host = urlparse(url).hostname or ""
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return parts[-2]
+    return host
 
 
 def _profile_username_score(
@@ -2156,19 +2335,85 @@ def _variant_confidence(variant: UsernameVariant) -> str:
     return variant.confidence
 
 
+def _structured_profile_reference(result: AdapterResult, *, cross_source_confirmed: bool = False) -> str:
+    existing = _json_object(result.raw_reference)
+    if existing and _has_profile_shape(existing):
+        return json.dumps(existing, sort_keys=True)
+    structured = {
+        "type": "discovered_profile",
+        "target": result.target,
+        "platform": result.platform or _platform_from_url(result.url),
+        "url": result.url,
+        "source": result.source,
+        "status": "available",
+        "confidence": _normalize_confidence(result.confidence),
+        "evidence": _profile_evidence_reason(result, cross_source_confirmed=cross_source_confirmed),
+        "observed_at": utc_now_iso(),
+        "raw_reference": result.raw_reference,
+    }
+    return json.dumps(structured, sort_keys=True)
+
+
+def _json_object(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _has_profile_shape(value: dict[str, object]) -> bool:
+    required = {
+        "type",
+        "target",
+        "platform",
+        "url",
+        "source",
+        "status",
+        "confidence",
+        "evidence",
+        "observed_at",
+        "raw_reference",
+    }
+    return required.issubset(value)
+
+
+def _profile_evidence_reason(result: AdapterResult, *, cross_source_confirmed: bool = False) -> str:
+    if cross_source_confirmed:
+        return "cross_source_confirmed_url"
+    lowered = result.raw_reference.lower()
+    if "timeout" in lowered:
+        return "timeout"
+    if "blocked" in lowered or "rate-limit" in lowered or "rate limited" in lowered:
+        return "blocked"
+    if "ambiguous" in lowered or "redirect" in lowered:
+        return "ambiguous_redirect"
+    if result.source == "wmn_username":
+        return "template_only"
+    return "exact_username_url"
+
+
 def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_FindingInput]:
     findings: list[_FindingInput] = []
+    profile_sources: dict[str, set[str]] = {}
+    for result in results:
+        if result.source in {"sherlock", "sherlock_username", "maigret", "maigret_username", "wmn_username"}:
+            profile_sources.setdefault(result.url.strip().lower(), set()).add(result.source)
     for result in results:
         source = result.source
         confidence = _normalize_confidence(result.confidence)
         if source in {"sherlock", "sherlock_username", "maigret", "maigret_username", "wmn_username"}:
+            structured = _structured_profile_reference(
+                result,
+                cross_source_confirmed=len(profile_sources.get(result.url.strip().lower(), set())) > 1,
+            )
             findings.append(
                 _FindingInput(
                     finding_type="discovered_profile",
                     value=result.url,
                     source=source,
                     confidence=confidence,
-                    raw_reference=result.raw_reference,
+                    raw_reference=structured,
                 )
             )
             continue

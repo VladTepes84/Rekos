@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import ExternalToolExecutionError, ExternalToolMissingError
+from .errors import ExternalToolExecutionError, ExternalToolMissingError, ExternalToolTimeoutError
 from .storage import CaseStore
 
 
@@ -80,7 +80,7 @@ def _run_command(command: list[str], tool: str) -> CommandOutput:
             timeout=TOOL_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ExternalToolExecutionError(
+        raise ExternalToolTimeoutError(
             f"{tool} timed out after {TOOL_TIMEOUT_SECONDS} seconds."
         ) from exc
     stdout = completed.stdout.strip()

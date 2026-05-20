@@ -7,10 +7,19 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+
+from rekos.errors import (
+    ExternalToolExecutionError,
+    ExternalToolMissingError,
+    ExternalToolTimeoutError,
+)
 
 if TYPE_CHECKING:
     from rekos.storage import CaseStore
+
+
+AdapterStatus = Literal["available", "failed", "timeout", "rate_limited", "blocked", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +40,22 @@ class SourceRunResult:
     results: list[AdapterResult]
     artifacts: list[Path]
     skipped: bool = False
+    status: AdapterStatus = "available"
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class AdapterRuntimeResult:
+    source: str
+    target: str
+    status: AdapterStatus
+    raw_output: str = ""
+    results: list[AdapterResult] | None = None
+    error: str = ""
+
+    @property
+    def parsed_results(self) -> list[AdapterResult]:
+        return self.results or []
 
 
 class BaseSourceAdapter:
@@ -102,3 +127,80 @@ class BaseSourceAdapter:
 def _safe_export_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip(".-")
     return (cleaned or "target")[:80]
+
+
+def run_adapter_sandboxed(
+    adapter: BaseSourceAdapter,
+    case: str,
+    target: str,
+    *,
+    retries: int = 1,
+) -> AdapterRuntimeResult:
+    missing = adapter.missing_dependencies()
+    if missing:
+        return AdapterRuntimeResult(
+            source=adapter.name,
+            target=target,
+            status="skipped",
+            error=f"Missing dependencies for {adapter.name}: {', '.join(missing)}.",
+        )
+
+    attempts = max(1, retries + 1)
+    last_result: AdapterRuntimeResult | None = None
+    for attempt in range(attempts):
+        try:
+            raw_output = adapter.run(case, target)
+        except Exception as exc:
+            status = _classify_adapter_exception(exc)
+            last_result = AdapterRuntimeResult(
+                source=adapter.name,
+                target=target,
+                status=status,
+                error=str(exc) or exc.__class__.__name__,
+            )
+            if attempt + 1 < attempts and status in {"failed", "timeout"}:
+                continue
+            return last_result
+
+        try:
+            results = adapter.parse_results(target, raw_output)
+        except Exception as exc:
+            return AdapterRuntimeResult(
+                source=adapter.name,
+                target=target,
+                status="failed",
+                raw_output=raw_output,
+                error=f"Failed to parse source output: {exc}",
+            )
+
+        return AdapterRuntimeResult(
+            source=adapter.name,
+            target=target,
+            status="available",
+            raw_output=raw_output,
+            results=results,
+        )
+
+    return last_result or AdapterRuntimeResult(
+        source=adapter.name,
+        target=target,
+        status="failed",
+        error="Source failed without details.",
+    )
+
+
+def _classify_adapter_exception(exc: Exception) -> AdapterStatus:
+    if isinstance(exc, ExternalToolMissingError):
+        return "skipped"
+    if isinstance(exc, ExternalToolTimeoutError):
+        return "timeout"
+    message = str(exc).lower()
+    if "timed out" in message or "timeout" in message:
+        return "timeout"
+    if "429" in message or "rate limit" in message or "too many requests" in message:
+        return "rate_limited"
+    if "403" in message or "forbidden" in message or "blocked" in message or "captcha" in message:
+        return "blocked"
+    if isinstance(exc, ExternalToolExecutionError):
+        return "failed"
+    return "failed"
