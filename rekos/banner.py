@@ -51,7 +51,7 @@ def render_banner() -> Group:
             (" is installed and ready to use.\n      Run '", "white"),
             ("rekos quickstart", "bold magenta"),
             ("' to get started.\n      ", "white"),
-            ('pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"', "bright_green"),
+            ("pipx install rekos", "bright_green"),
         ),
         border_style="magenta",
         box=box.ROUNDED,

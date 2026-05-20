@@ -15,21 +15,13 @@ A case is a local workspace for one public-source research thread. Cases are sto
 
 ## Installation
 
-Recommended full install:
+Install with pipx:
 
 ```bash
-pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"
+pipx install rekos
 ```
 
-The full install includes optional Maigret support for `maigret_username`. Users still run REKOS commands such as `rekos investigate username <case> <username>`; REKOS calls available username sources through its source adapters.
-
-Minimal install:
-
-```bash
-pipx install git+https://github.com/VladTepes84/Rekos.git
-```
-
-The minimal install keeps the REKOS core usable without Maigret. Username investigations still run available built-in sources and any installed external tools.
+Users run REKOS commands such as `rekos investigate username <case> <username>` and `rekos investigate domain <case> <domain>`. REKOS calls available passive sources through its source adapters and continues cleanly when optional external tools are absent.
 
 Install from a local checkout:
 
@@ -55,7 +47,7 @@ rekos --help
 ## Optional Integrations
 
 - `sherlock` enables the `sherlock_username` source when the `sherlock` command is installed
-- `maigret` enables the `maigret_username` source; install it with `pipx inject rekos maigret` or install REKOS with `[full]`
+- `maigret` enables the `maigret_username` source when available in the REKOS runtime
 - `exiftool` or `mediainfo` for file metadata collection
 - Playwright is optional for URL screenshots; HTTP snapshots still work without it
 

@@ -182,7 +182,8 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "REKOS READY" in output
-    assert 'pipx install --python python3.12 "rekos[full] @ git+https://github.com/VladTepes84/Rekos.git"' in output
+    assert "pipx install rekos" in output
+    assert "rekos[full]" not in output
     assert "1. " not in output
     assert "2. " not in output
     assert "rekos new-case my_case" in output
@@ -195,15 +196,15 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "Common commands:" not in output
     assert "Investigations:" not in output
     assert "[+] Terminal-native. Passive OSINT. Local-first." in output
-    assert "REKOS 1.1.2" not in output
-    assert "Version: 1.1.2" in output
+    assert "REKOS 1.2.0" not in output
+    assert "Version: 1.2.0" in output
 
 
 def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 1.1.2\n"
+    assert output == "rekos 1.2.0\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 
@@ -307,13 +308,14 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["wayback_url"].supported_target_types == ("url", "domain")
 
 
-def test_pyproject_exposes_username_optional_dependencies() -> None:
+def test_pyproject_uses_single_public_package() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     optional = data["project"]["optional-dependencies"]
 
-    assert optional["username"] == ["maigret"]
-    assert optional["full"] == ["maigret"]
+    assert "username" not in optional
+    assert "full" not in optional
     assert "maigret" not in data["project"]["dependencies"]
+    assert data["project"]["name"] == "rekos"
 
 
 def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
@@ -329,8 +331,8 @@ def test_sources_check_reports_dependency_status(monkeypatch, capsys) -> None:
     assert "sherlock: missing" in output
     assert "maigret_username:" in output
     assert "maigret: missing" in output
-    assert "pipx inject rekos maigret" in output
-    assert "install REKOS with [full]" in output
+    assert "Optional tool missing; REKOS continues without it." in output
+    assert "rekos[full]" not in output
 
 
 def test_sources_check_detects_mocked_maigret_availability(monkeypatch, capsys) -> None:
