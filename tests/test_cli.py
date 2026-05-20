@@ -1494,6 +1494,150 @@ def test_investigate_username_marks_unparsable_source_output_failed(
     assert finding_count == 1
 
 
+def test_username_investigation_e2e_regression_pack(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: ["/usr/bin/maigret"])
+
+    shared_url = "https://shared.example/Alice.Smith"
+    wmn_url = "https://github.com/Alice.Smith"
+
+    def fake_sherlock(self, case: str, target: str) -> str:
+        if target == "Alice.Smith":
+            return f"{shared_url}\n"
+        if target == "alice.smith":
+            raise ExternalToolTimeoutError("sherlock timed out after 120 seconds.")
+        return ""
+
+    def fake_maigret(self, case: str, target: str) -> str:
+        if target == "Alice.Smith":
+            return f"{shared_url}\n"
+        return ""
+
+    def fake_wmn(self, case: str, target: str) -> str:
+        if target == "Alice.Smith":
+            return json.dumps(
+                {
+                    "source": "wmn_username",
+                    "target": target,
+                    "results": [
+                        {
+                            "platform": "GitHub",
+                            "url": wmn_url,
+                            "status_code": 200,
+                            "hit": True,
+                            "warning": "",
+                            "error": "",
+                        }
+                    ],
+                }
+            )
+        if target == "alice.smith":
+            raise ExternalToolExecutionError("HTTP 403 blocked by passive source")
+        return json.dumps({"source": "wmn_username", "target": target, "results": []})
+
+    monkeypatch.setattr(SherlockAdapter, "run", fake_sherlock)
+    monkeypatch.setattr(MaigretAdapter, "run", fake_maigret)
+    monkeypatch.setattr(WmnUsernameAdapter, "run", fake_wmn)
+
+    assert main(["new-case", "case-username-e2e"]) == 0
+    assert main(["investigate", "username", "case-username-e2e", "Alice.Smith"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed username investigation" in output
+    assert "Warning: sherlock_username timed out for Alice.Smith; continuing with other sources." in output
+    assert "Warning: wmn_username was blocked for Alice.Smith; continuing with other sources." in output
+
+    db_path = tmp_path / "rekos_cases" / "case-username-e2e" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        source_errors = connection.execute(
+            """
+            SELECT source, status
+            FROM source_investigation_errors
+            ORDER BY source, status
+            """
+        ).fetchall()
+        findings = connection.execute(
+            """
+            SELECT type, value, source, confidence, raw_reference
+            FROM normalized_findings
+            WHERE type = 'discovered_profile'
+            ORDER BY source, value
+            """
+        ).fetchall()
+        entities = connection.execute(
+            """
+            SELECT entity_type, value, COUNT(*)
+            FROM entities
+            WHERE entity_type IN ('username', 'platform', 'url', 'source')
+            GROUP BY entity_type, value
+            ORDER BY entity_type, value
+            """
+        ).fetchall()
+        relationships = connection.execute(
+            """
+            SELECT se.entity_type, se.value, r.relationship_type, r.confidence,
+                   te.entity_type, te.value, r.note
+            FROM relationships r
+            JOIN entities se ON se.entity_id = r.source_entity_id
+            JOIN entities te ON te.entity_id = r.target_entity_id
+            WHERE r.relationship_type IN ('discovered_on', 'produced_by', 'confirmed_by')
+            ORDER BY r.relationship_type, se.value, te.value
+            """
+        ).fetchall()
+
+    assert ("sherlock_username", "timeout") in source_errors
+    assert ("wmn_username", "blocked") in source_errors
+
+    structured = {
+        (row[1], row[2]): json.loads(row[4])
+        for row in findings
+    }
+    required_shape = {
+        "type",
+        "target",
+        "platform",
+        "url",
+        "source",
+        "status",
+        "confidence",
+        "evidence",
+        "observed_at",
+    }
+    assert all(required_shape.issubset(item) for item in structured.values())
+    assert all(item["status"] == "available" for item in structured.values())
+    assert all(item["evidence"] not in {"timeout", "blocked"} for item in structured.values())
+    assert structured[(shared_url, "sherlock_username")]["confidence"] == "high"
+    assert structured[(shared_url, "sherlock_username")]["evidence"] == "cross_source_confirmed_url"
+    assert structured[(shared_url, "maigret_username")]["confidence"] == "high"
+    assert structured[(shared_url, "maigret_username")]["evidence"] == "cross_source_confirmed_url"
+    assert structured[(wmn_url, "wmn_username")]["confidence"] == "low"
+    assert structured[(wmn_url, "wmn_username")]["evidence"] == "template_only"
+    assert {row[3] for row in findings if row[1] == shared_url} == {"high"}
+    assert {row[3] for row in findings if row[1] == wmn_url} == {"low"}
+
+    assert ("url", shared_url, 1) in entities
+    assert ("url", wmn_url, 1) in entities
+    assert ("platform", "shared", 1) in entities
+    assert ("platform", "github", 1) in entities
+    assert ("source", "sherlock_username", 1) in entities
+    assert ("source", "maigret_username", 1) in entities
+    assert ("source", "wmn_username", 1) in entities
+    assert any(row[2] == "discovered_on" and row[0:2] == ("username", "Alice.Smith") for row in relationships)
+    assert any(row[2] == "produced_by" and row[5] == shared_url for row in relationships)
+    assert sum(1 for row in relationships if row[2] == "confirmed_by" and row[5] == shared_url) == 2
+    assert all("source=" in row[6] and "observed_at=" in row[6] for row in relationships)
+
+    archive = tmp_path / "case-username-e2e.zip"
+    assert main(["export-case", "case-username-e2e", "--output", str(archive)]) == 0
+    with zipfile.ZipFile(archive) as exported:
+        names = set(exported.namelist())
+    assert "case-username-e2e/rekos.db" in names
+    assert "case-username-e2e/manifest.json" in names
+
+
 def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
