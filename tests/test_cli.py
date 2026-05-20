@@ -2036,10 +2036,10 @@ def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
             AdapterResult(
                 source="wmn_username",
                 target="alice",
-                url="https://www.github.com/alice/",
+                url="https://github.com/alice/",
                 platform="github",
                 confidence="medium",
-                raw_reference="github trailing slash",
+                raw_reference="github no www trailing slash",
             ),
             AdapterResult(
                 source="sherlock_username",
@@ -2102,7 +2102,7 @@ def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
     assert main(["findings", "case-findings-summary", "--verbose"]) == 0
     verbose_output = capsys.readouterr().out
     assert "https://www.github.com/alice" in verbose_output
-    assert "https://www.github.com/alice/" in verbose_output
+    assert "https://github.com/alice/" in verbose_output
     assert "Confirming sources" in verbose_output
 
 

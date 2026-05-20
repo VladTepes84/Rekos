@@ -624,11 +624,14 @@ def _summary_sort_score(finding) -> tuple[int, int, int]:
 def _summary_value_key(value: str) -> str:
     parsed = urlparse(value.strip())
     if parsed.scheme in {"http", "https"} and parsed.netloc:
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
         path = parsed.path.rstrip("/")
         return urlunparse(
             (
                 parsed.scheme.lower(),
-                parsed.netloc.lower(),
+                host,
                 path,
                 "",
                 parsed.query,
