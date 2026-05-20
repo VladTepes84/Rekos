@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.table import Table
@@ -138,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     findings = subparsers.add_parser("findings", help="List normalized findings")
     findings.add_argument("case")
+    findings.add_argument("--verbose", action="store_true", help="Show full evidence details")
 
     score = subparsers.add_parser("score", help="Score normalized findings")
     score.add_argument("case")
@@ -433,18 +435,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not findings:
                 console.print("No findings recorded")
                 return 0
-            for finding in findings:
-                console.print(
-                    f"{finding.finding_id} {finding.finding_type}: {finding.value} "
-                    f"({finding.confidence}) from {finding.source}; "
-                    f"quality {finding.quality_score}/{quality_label(finding.quality_score)}"
-                )
-                console.print(
-                    f"  Confirming sources ({finding.confirming_sources_count}): "
-                    f"{finding.confirming_sources}"
-                )
-                if finding.quality_reason:
-                    console.print(f"  Reason: {finding.quality_reason}")
+            if args.verbose:
+                _print_findings_verbose(findings)
+            else:
+                _print_findings_summary(args.case, findings)
             return 0
 
         if args.command == "score":
@@ -567,6 +561,60 @@ def _username_failure_warning(failure: SourceInvestigationFailure, username: str
     if failure.source == "maigret_username" and not failure.error.startswith("Missing dependencies"):
         return f"Maigret source failed for {username}; continuing with other sources."
     return failure.error
+
+
+def _print_findings_summary(case: str, findings) -> None:
+    console.print(f"Completed findings summary for {case}")
+    sorted_findings = sorted(
+        findings,
+        key=lambda finding: (
+            -_confidence_rank(finding.confidence),
+            finding.source,
+            finding.value,
+        ),
+    )
+    for confidence in ("high", "medium", "low"):
+        group = [finding for finding in sorted_findings if finding.confidence == confidence]
+        if not group:
+            continue
+        console.print("")
+        console.print(f"{confidence.title()} confidence:")
+        for finding in group:
+            label = _finding_summary_label(finding)
+            console.print(f"- {label:<12} {finding.value}", markup=False)
+    console.print("")
+    console.print("Details:")
+    console.print(f"Run `rekos findings {case} --verbose` for full evidence details.", markup=False)
+
+
+def _print_findings_verbose(findings) -> None:
+    for finding in findings:
+        console.print(
+            f"{finding.finding_id} {finding.finding_type}: {finding.value} "
+            f"({finding.confidence}) from {finding.source}; "
+            f"quality {finding.quality_score}/{quality_label(finding.quality_score)}"
+        )
+        console.print(
+            f"  Confirming sources ({finding.confirming_sources_count}): "
+            f"{finding.confirming_sources}"
+        )
+        if finding.quality_reason:
+            console.print(f"  Reason: {finding.quality_reason}")
+
+
+def _confidence_rank(confidence: str) -> int:
+    return {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+
+
+def _finding_summary_label(finding) -> str:
+    if finding.finding_type == "discovered_profile":
+        host = urlparse(finding.value).hostname or ""
+        parts = [part for part in host.split(".") if part]
+        if len(parts) >= 2:
+            return parts[-2].title()
+        if parts:
+            return parts[0].title()
+    return finding.finding_type
 
 
 if __name__ == "__main__":

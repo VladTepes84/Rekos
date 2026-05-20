@@ -1287,7 +1287,7 @@ def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     output = capsys.readouterr().out
     assert "Discovered profiles: 1" in output
 
-    assert main(["findings", "case-username-multisource"]) == 0
+    assert main(["findings", "case-username-multisource", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "Confirming sources (3): maigret_username, sherlock_username, wmn_username" in findings_output
 
@@ -1870,11 +1870,12 @@ def test_sources_run_crtsh_domain_with_mocked_http(
 
     assert main(["findings", "case-crtsh-source"]) == 0
     findings_output = capsys.readouterr().out
-    assert "certificate_record: www.example.com" in findings_output
-    assert "(high)" in findings_output
-    assert "discovered_domain: api.example.com" in findings_output
-    assert "(medium)" in findings_output
-    assert "from crtsh_domain" in findings_output
+    assert "Completed findings summary for case-crtsh-source" in findings_output
+    assert "High confidence:" in findings_output
+    assert "certificate_record www.example.com" in findings_output
+    assert "Medium confidence:" in findings_output
+    assert "discovered_domain api.example.com" in findings_output
+    assert "Run `rekos findings case-crtsh-source --verbose`" in findings_output
 
 
 def test_sources_run_wayback_url_with_mocked_http(
@@ -1963,6 +1964,101 @@ def test_findings_deduplicate_repeated_source_results(
     ]
 
 
+def test_findings_default_groups_and_hides_verbose_details(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-findings-readable"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-findings-readable",
+        [
+            AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url="https://github.com/alice",
+                platform="github",
+                confidence="high",
+                raw_reference="HTTP status: 200",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.instagram.com/alice",
+                platform="instagram",
+                confidence="high",
+                raw_reference="https://www.instagram.com/alice",
+            ),
+            AdapterResult(
+                source="maigret_username",
+                target="alice",
+                url="https://tiktok.com/@alice",
+                platform="tiktok",
+                confidence="medium",
+                raw_reference="https://tiktok.com/@alice",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://profiles.example/AliceSmith",
+                platform="profiles",
+                confidence="low",
+                raw_reference="https://profiles.example/AliceSmith",
+            ),
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["findings", "case-findings-readable"]) == 0
+    output = capsys.readouterr().out
+
+    assert "Completed findings summary for case-findings-readable" in output
+    assert "High confidence:" in output
+    assert "Medium confidence:" in output
+    assert "Low confidence:" in output
+    assert "- Github" in output
+    assert "- Instagram" in output
+    assert "- Tiktok" in output
+    assert output.index("- Instagram") < output.index("- Github") < output.index("- Tiktok")
+    assert "Run `rekos findings case-findings-readable --verbose` for full evidence details." in output
+    assert "Confirming sources" not in output
+    assert "Reason:" not in output
+    assert "quality" not in output
+
+
+def test_findings_verbose_keeps_full_evidence_details(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-findings-verbose"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-findings-verbose",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://github.com/alice",
+                platform="github",
+                confidence="high",
+                raw_reference="https://github.com/alice",
+            )
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["findings", "case-findings-verbose", "--verbose"]) == 0
+    output = capsys.readouterr().out
+
+    assert "discovered_profile: https://github.com/alice" in output
+    assert "(high) from sherlock_username" in output
+    assert "quality" in output
+    assert "Confirming sources" in output
+    assert "Reason:" in output
+
+
 def test_score_calculates_quality_and_labels(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -2049,7 +2145,7 @@ def test_score_calculates_quality_and_labels(
     assert "low quality label" in weak_score[3]
     assert "does not claim identity ownership" in profile_scores[0][3]
 
-    assert main(["findings", "case-score"]) == 0
+    assert main(["findings", "case-score", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "quality" in findings_output
     assert "Reason:" in findings_output
@@ -2093,7 +2189,7 @@ def test_discovered_profile_quality_scores_username_match_strength(
     )
     capsys.readouterr()
 
-    assert main(["findings", "case-profile-quality"]) == 0
+    assert main(["findings", "case-profile-quality", "--verbose"]) == 0
 
     output = capsys.readouterr().out
     assert "quality 0/low" not in output
