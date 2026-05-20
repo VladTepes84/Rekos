@@ -1146,7 +1146,28 @@ def test_investigate_username_with_mocked_sherlock(
     assert [row[0] for row in finding_rows] == ["discovered_profile"] * 4
     assert [row[2] for row in finding_rows] == ["sherlock_username"] * 4
     assert [row[3] for row in finding_rows] == ["high", "medium", "low", "medium"]
-    assert all(row[1] == row[4] for row in finding_rows)
+    structured_findings = [json.loads(row[4]) for row in finding_rows]
+    required_shape = {
+        "type",
+        "target",
+        "platform",
+        "url",
+        "source",
+        "status",
+        "confidence",
+        "evidence",
+        "observed_at",
+    }
+    assert all(required_shape.issubset(finding) for finding in structured_findings)
+    assert [finding["type"] for finding in structured_findings] == ["discovered_profile"] * 4
+    assert [finding["status"] for finding in structured_findings] == ["available"] * 4
+    assert [finding["evidence"] for finding in structured_findings] == [
+        "exact_username_url",
+        "exact_username_url",
+        "exact_username_url",
+        "exact_username_url",
+    ]
+    assert all(finding["url"] == row[1] for finding, row in zip(structured_findings, finding_rows))
     assert all(Path(row[3]).exists() for row in profile_rows)
     assert "investigation.completed" in event_types
 
@@ -1218,7 +1239,7 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         ).fetchall()
         finding_rows = connection.execute(
             """
-            SELECT type, value, source, confidence
+            SELECT type, value, source, confidence, raw_reference
             FROM normalized_findings
             ORDER BY id
             """
@@ -1235,12 +1256,18 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         ("maigret_username", "alice", "https://shared.example/alice", "shared", "high"),
         ("maigret_username", "alice", "https://maigret.example/alice", "maigret", "medium"),
     ]
-    assert finding_rows == [
+    assert [row[0:4] for row in finding_rows] == [
         ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "medium"),
         ("discovered_profile", "https://shared.example/alice", "sherlock_username", "high"),
         ("discovered_profile", "https://shared.example/alice", "maigret_username", "high"),
         ("discovered_profile", "https://maigret.example/alice", "maigret_username", "medium"),
     ]
+    structured_rows = {
+        (row[1], row[2]): json.loads(row[4])
+        for row in finding_rows
+    }
+    assert structured_rows[("https://shared.example/alice", "sherlock_username")]["evidence"] == "cross_source_confirmed_url"
+    assert structured_rows[("https://shared.example/alice", "maigret_username")]["evidence"] == "cross_source_confirmed_url"
 
 
 def test_same_username_different_profile_urls_stays_medium(

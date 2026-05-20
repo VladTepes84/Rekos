@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1750,9 +1751,18 @@ class CaseStore:
 
         for result in profile_results:
             confidence = _normalize_confidence(result.confidence)
+            url_key = result.url.strip().lower()
+            structured = _json_object(
+                _structured_profile_reference(
+                    result,
+                    cross_source_confirmed=len(url_sources.get(url_key, set())) > 1,
+                )
+            )
             platform_value = (result.platform or _platform_from_url(result.url)).strip().lower()
             if not platform_value:
                 platform_value = "unknown"
+            observed_at = str(structured.get("observed_at") or created_at)
+            evidence = str(structured.get("evidence") or _profile_evidence_reason(result))
             username_entity = self._ensure_entity_in_connection(
                 connection,
                 "username",
@@ -1777,7 +1787,7 @@ class CaseStore:
                 result.source,
                 "passive source adapter",
             )
-            note = f"source={result.source}; url={result.url}; observed_at={created_at}"
+            note = f"source={result.source}; evidence={evidence}; url={result.url}; observed_at={observed_at}"
             self._ensure_relationship_in_connection(
                 connection,
                 source_entity_id=username_entity.entity_id,
@@ -1794,7 +1804,7 @@ class CaseStore:
                 confidence=confidence,
                 note=note,
             )
-            if len(url_sources.get(result.url.strip().lower(), set())) > 1:
+            if len(url_sources.get(url_key, set())) > 1:
                 self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=source_entity.entity_id,
@@ -2325,19 +2335,84 @@ def _variant_confidence(variant: UsernameVariant) -> str:
     return variant.confidence
 
 
+def _structured_profile_reference(result: AdapterResult, *, cross_source_confirmed: bool = False) -> str:
+    existing = _json_object(result.raw_reference)
+    if existing and _has_profile_shape(existing):
+        return json.dumps(existing, sort_keys=True)
+    structured = {
+        "type": "discovered_profile",
+        "target": result.target,
+        "platform": result.platform or _platform_from_url(result.url),
+        "url": result.url,
+        "source": result.source,
+        "status": "available",
+        "confidence": _normalize_confidence(result.confidence),
+        "evidence": _profile_evidence_reason(result, cross_source_confirmed=cross_source_confirmed),
+        "observed_at": utc_now_iso(),
+        "raw_reference": result.raw_reference,
+    }
+    return json.dumps(structured, sort_keys=True)
+
+
+def _json_object(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _has_profile_shape(value: dict[str, object]) -> bool:
+    required = {
+        "type",
+        "target",
+        "platform",
+        "url",
+        "source",
+        "status",
+        "confidence",
+        "evidence",
+        "observed_at",
+    }
+    return required.issubset(value)
+
+
+def _profile_evidence_reason(result: AdapterResult, *, cross_source_confirmed: bool = False) -> str:
+    if cross_source_confirmed:
+        return "cross_source_confirmed_url"
+    lowered = result.raw_reference.lower()
+    if "timeout" in lowered:
+        return "timeout"
+    if "blocked" in lowered or "rate-limit" in lowered or "rate limited" in lowered:
+        return "blocked"
+    if "ambiguous" in lowered or "redirect" in lowered:
+        return "ambiguous_redirect"
+    if result.source == "wmn_username":
+        return "template_only"
+    return "exact_username_url"
+
+
 def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_FindingInput]:
     findings: list[_FindingInput] = []
+    profile_sources: dict[str, set[str]] = {}
+    for result in results:
+        if result.source in {"sherlock", "sherlock_username", "maigret", "maigret_username", "wmn_username"}:
+            profile_sources.setdefault(result.url.strip().lower(), set()).add(result.source)
     for result in results:
         source = result.source
         confidence = _normalize_confidence(result.confidence)
         if source in {"sherlock", "sherlock_username", "maigret", "maigret_username", "wmn_username"}:
+            structured = _structured_profile_reference(
+                result,
+                cross_source_confirmed=len(profile_sources.get(result.url.strip().lower(), set())) > 1,
+            )
             findings.append(
                 _FindingInput(
                     finding_type="discovered_profile",
                     value=result.url,
                     source=source,
                     confidence=confidence,
-                    raw_reference=result.raw_reference,
+                    raw_reference=structured,
                 )
             )
             continue
