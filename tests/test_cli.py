@@ -199,7 +199,7 @@ def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 0.1.0\n"
+    assert output == "rekos 1.1.0\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 

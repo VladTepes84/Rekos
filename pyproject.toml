@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rekos"
-version = "0.1.0"
+version = "1.1.0"
 description = "Terminal-native passive OSINT CLI for local-first public-source investigation workspaces"
 readme = "README.md"
 requires-python = ">=3.10"
