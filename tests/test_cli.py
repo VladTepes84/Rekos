@@ -187,6 +187,7 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "2. " not in output
     assert "rekos new-case my_case" in output
     assert "rekos investigate username my_case username" in output
+    assert "rekos investigate domain my_case example.com" in output
     assert "rekos findings my_case" in output
     assert "rekos score my_case" in output
     assert "rekos graph-summary my_case" in output
