@@ -81,6 +81,8 @@ Normal workflow:
 5. Inspect relationships with `rekos graph-summary` or `rekos list-entities`.
 6. Export the workspace with `rekos export-case`.
 
+Use `rekos findings my_case` for a concise terminal summary. Use `rekos findings my_case --verbose` for full evidence details.
+
 Most users only need these commands:
 
 ```bash
