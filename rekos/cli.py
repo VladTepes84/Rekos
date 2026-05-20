@@ -186,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "quickstart":
             banner_console.print(render_banner())
+            banner_console.print(f"Version: {__version__}")
             return 0
 
         if args.command == "version":
