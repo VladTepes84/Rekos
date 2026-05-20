@@ -199,7 +199,7 @@ def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 0.1.0\n"
+    assert output == "rekos 1.1.0\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 
@@ -745,11 +745,15 @@ def test_graph_summary_counts_and_most_connected(
     assert main(["graph-summary", "case-summary"]) == 0
 
     output = capsys.readouterr().out
-    assert "Total entities: 3" in output
-    assert "Total relationships: 2" in output
-    assert "- domain: 1" in output
-    assert "- username: 1" in output
-    assert "example.com (2)" in output
+    assert "Graph overview" in output
+    assert "Entities: 3" in output
+    assert "Relationships: 2" in output
+    assert "Entity types" in output
+    assert "domain" in output
+    assert "username" in output
+    assert "Most connected" in output
+    assert "example.com" in output
+    assert entity_ids[1] not in output
 
 
 def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -991,6 +995,15 @@ def test_investigate_username_with_mocked_sherlock(
     assert "Completed username investigation" in output
     assert "Variants: 4" in output
     assert "Discovered profiles: 4" in output
+    assert "Next steps:" in output
+    assert "rekos findings case-investigate" in output
+    assert "rekos findings case-investigate --verbose" in output
+    assert "rekos graph-summary case-investigate" in output
+    assert "rekos export-case case-investigate --output case-investigate.zip" in output
+    assert "Confirming sources" not in output
+    assert "Reason:" not in output
+    assert "quality" not in output
+    assert "finding_" not in output
     assert [call[3] for call in calls] == [
         "Alice.Smith",
         "alice.smith",
@@ -1045,9 +1058,14 @@ def test_investigate_username_with_mocked_sherlock(
     assert investigation_row == ("Alice.Smith", 4, 4)
     assert [row[0] for row in entity_rows].count("username") == 4
     assert [row[0] for row in entity_rows].count("url") == 4
+    assert [row[0] for row in entity_rows].count("platform") == 1
+    assert [row[0] for row in entity_rows].count("source") == 1
     assert [row[0] for row in relationship_rows].count("possible_match") == 3
     assert [row[0] for row in relationship_rows].count("discovered_from") == 4
     assert [row[0] for row in relationship_rows].count("same_target") == 4
+    assert [row[0] for row in relationship_rows].count("discovered_on") == 4
+    assert [row[0] for row in relationship_rows].count("hosts_profile") == 4
+    assert [row[0] for row in relationship_rows].count("produced") == 4
     assert [row[1] for row in profile_rows] == [
         "https://profiles.example/Alice.Smith",
         "https://profiles.example/alice.smith",
@@ -1071,6 +1089,40 @@ def test_investigate_username_with_mocked_sherlock(
     assert all(row[1] == row[4] for row in finding_rows)
     assert all(Path(row[3]).exists() for row in profile_rows)
     assert "investigation.completed" in event_types
+
+    assert main(["investigate", "username", "case-investigate", "Alice.Smith"]) == 0
+    capsys.readouterr()
+    with sqlite3.connect(db_path) as connection:
+        rerun_entity_counts = dict(
+            connection.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            ).fetchall()
+        )
+        rerun_relationship_counts = dict(
+            connection.execute(
+                "SELECT relationship_type, COUNT(*) FROM relationships GROUP BY relationship_type"
+            ).fetchall()
+        )
+
+    assert rerun_entity_counts == {
+        "platform": 1,
+        "source": 1,
+        "url": 4,
+        "username": 4,
+    }
+    assert rerun_relationship_counts == {
+        "discovered_from": 4,
+        "discovered_on": 4,
+        "hosts_profile": 4,
+        "possible_match": 3,
+        "produced": 4,
+        "same_target": 4,
+    }
+
+    assert main(["graph-summary", "case-investigate"]) == 0
+    graph_output = capsys.readouterr().out
+    assert "platform" in graph_output
+    assert "source" in graph_output
 
 
 def test_investigate_username_runs_maigret_and_deduplicates(
@@ -1188,7 +1240,7 @@ def test_investigate_username_records_missing_maigret_source(
     assert main(["investigate", "username", "case-maigret-missing-investigate", "alice"]) == 0
 
     output = capsys.readouterr().out
-    assert "Warning:" in output
+    assert "Warnings:" in output
     assert "Missing dependencies for maigret_username" in output
 
     with sqlite3.connect(tmp_path / "rekos_cases" / "case-maigret-missing-investigate" / "rekos.db") as connection:
@@ -1232,7 +1284,7 @@ def test_investigate_username_prints_clean_maigret_runtime_warning(
     assert main(["investigate", "username", "case-maigret-runtime-failure", "peppespan00ac"]) == 0
 
     output = capsys.readouterr().out
-    assert "Warning: Maigret source failed for peppespan00ac; continuing with other sources." in output
+    assert "- Maigret source failed for peppespan00ac; continuing with other sources." in output
     assert "Traceback" not in output
     assert "upstream details" not in output
 
@@ -1287,7 +1339,7 @@ def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     output = capsys.readouterr().out
     assert "Discovered profiles: 1" in output
 
-    assert main(["findings", "case-username-multisource"]) == 0
+    assert main(["findings", "case-username-multisource", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "Confirming sources (3): maigret_username, sherlock_username, wmn_username" in findings_output
 
@@ -1517,8 +1569,8 @@ def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "Discovered profiles: 4" in output
     assert "https://profiles.example/Alice.Smith (high) from Alice.Smith" in output
     assert "https://profiles.example/alice.smith (medium) from alice.smith" in output
-    assert "Graph entities: 8" in output
-    assert "Graph relationships: 11" in output
+    assert "Graph entities: 10" in output
+    assert "Graph relationships: 23" in output
     assert "Findings: 4" in output
     assert "discovered_profile: https://profiles.example/Alice.Smith" in output
     assert "Timeline events:" in output
@@ -1868,7 +1920,7 @@ def test_sources_run_crtsh_domain_with_mocked_http(
         ("discovered_domain", "mail.example.com", "crtsh_domain", "medium"),
     ]
 
-    assert main(["findings", "case-crtsh-source"]) == 0
+    assert main(["findings", "case-crtsh-source", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "certificate_record: www.example.com" in findings_output
     assert "(high)" in findings_output
@@ -1963,6 +2015,97 @@ def test_findings_deduplicate_repeated_source_results(
     ]
 
 
+def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-findings-summary"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-findings-summary",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.github.com/alice",
+                platform="github",
+                confidence="high",
+                raw_reference="github exact",
+            ),
+            AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url="https://github.com/alice/",
+                platform="github",
+                confidence="medium",
+                raw_reference="github no www trailing slash",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://t.me/alice",
+                platform="telegram",
+                confidence="high",
+                raw_reference="telegram",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://scratch.mit.edu/users/alice",
+                platform="scratch",
+                confidence="high",
+                raw_reference="scratch",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://steamcommunity.com/id/alice",
+                platform="steam",
+                confidence="high",
+                raw_reference="steam",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.tiktok.com/@alice",
+                platform="tiktok",
+                confidence="high",
+                raw_reference="tiktok",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.youtube.com/@alice",
+                platform="youtube",
+                confidence="high",
+                raw_reference="youtube",
+            ),
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["findings", "case-findings-summary"]) == 0
+    summary_output = capsys.readouterr().out
+    github_lines = [
+        line for line in summary_output.splitlines() if "github.com/alice" in line
+    ]
+    assert len(github_lines) == 1
+    assert "- GitHub" in summary_output
+    assert "- Telegram" in summary_output
+    assert "- Scratch" in summary_output
+    assert "- Steam" in summary_output
+    assert "- TikTok" in summary_output
+    assert "- YouTube" in summary_output
+    assert "Confirming sources" not in summary_output
+
+    assert main(["findings", "case-findings-summary", "--verbose"]) == 0
+    verbose_output = capsys.readouterr().out
+    assert "https://www.github.com/alice" in verbose_output
+    assert "https://github.com/alice/" in verbose_output
+    assert "Confirming sources" in verbose_output
+
+
 def test_score_calculates_quality_and_labels(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -2049,7 +2192,7 @@ def test_score_calculates_quality_and_labels(
     assert "low quality label" in weak_score[3]
     assert "does not claim identity ownership" in profile_scores[0][3]
 
-    assert main(["findings", "case-score"]) == 0
+    assert main(["findings", "case-score", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "quality" in findings_output
     assert "Reason:" in findings_output

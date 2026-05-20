@@ -10,6 +10,8 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
 
+from . import __version__
+
 
 BANNER_WIDTH = 112
 
@@ -70,7 +72,7 @@ def render_banner() -> Group:
             ("[+] ", "bright_cyan"),
             ("Terminal-native. Passive OSINT. Local-first.", "white"),
             ("  |  ", "blue"),
-            ("REKOS 0.1.0", "bold bright_cyan"),
+            (f"REKOS {__version__}", "bold bright_cyan"),
         )
     )
     return Group(

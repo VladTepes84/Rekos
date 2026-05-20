@@ -6,3 +6,6 @@ rekos.egg-info/
 cases/
 *.db
 
+
+# Local OSINT test artifacts
+*.txt
