@@ -54,6 +54,9 @@ ALLOWED_ENTITY_TYPES = {
     "note",
     "platform",
     "source",
+    "nameserver",
+    "mx",
+    "txt_record",
 }
 ALLOWED_RELATIONSHIP_TYPES = {
     "related_to",
@@ -85,6 +88,7 @@ ALLOWED_FINDING_TYPES = {
     "archive_record",
     "registration_record",
     "certificate_record",
+    "dns_record",
 }
 
 
@@ -2327,7 +2331,19 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
                         confidence="medium",
                         raw_reference=result.raw_reference,
                     )
+            )
+            continue
+
+        if source == "dns_domain":
+            findings.append(
+                _FindingInput(
+                    finding_type="dns_record",
+                    value=result.raw_reference,
+                    source=source,
+                    confidence=confidence,
+                    raw_reference=result.raw_reference,
                 )
+            )
             continue
 
         if source == "crtsh_domain":

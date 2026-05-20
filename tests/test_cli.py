@@ -187,6 +187,7 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "2. " not in output
     assert "rekos new-case my_case" in output
     assert "rekos investigate username my_case username" in output
+    assert "rekos investigate domain my_case example.com" in output
     assert "rekos findings my_case" in output
     assert "rekos score my_case" in output
     assert "rekos graph-summary my_case" in output
@@ -283,6 +284,7 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
 
     assert sorted(sources) == [
         "crtsh_domain",
+        "dns_domain",
         "http_snapshot",
         "maigret_username",
         "rdap_domain",
@@ -298,6 +300,8 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["wmn_username"].external_dependencies == ()
     assert sources["http_snapshot"].supported_target_types == ("url",)
     assert sources["http_snapshot"].external_dependencies == ()
+    assert sources["dns_domain"].supported_target_types == ("domain",)
+    assert sources["dns_domain"].external_dependencies == ()
     assert sources["rdap_domain"].supported_target_types == ("domain",)
     assert sources["crtsh_domain"].supported_target_types == ("domain",)
     assert sources["wayback_url"].supported_target_types == ("url", "domain")
@@ -755,6 +759,8 @@ def test_graph_summary_counts_and_most_connected(
     assert "domain" in output
     assert "username" in output
     assert "Most connected" in output
+    assert "Graph links" in output
+    assert "Graph links are internal relationships, not unique findings." in output
     assert "example.com" in output
     assert entity_ids[1] not in output
 
@@ -943,8 +949,7 @@ def test_list_sources_shows_status_findings_and_errors(
     registry = FakeSourceRegistry(
         {
             "rdap_domain": FakeSourceAdapter("rdap_domain"),
-            "crtsh_domain": FakeSourceAdapter("crtsh_domain", fail=True),
-            "wayback_url": FakeSourceAdapter("wayback_url"),
+            "dns_domain": FakeSourceAdapter("dns_domain", fail=True),
         }
     )
     monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
@@ -958,9 +963,8 @@ def test_list_sources_shows_status_findings_and_errors(
     output = capsys.readouterr().out
     assert "Source Runs" in output
     assert "rdap_domain" in output
-    assert "wayback_url" in output
     assert "ok" in output
-    assert "crtsh_domain" in output
+    assert "dns_domain" in output
     assert "failed" in output
     assert "temporary source failure" in output
 
@@ -1586,8 +1590,7 @@ def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
     registry = FakeSourceRegistry(
         {
             "rdap_domain": FakeSourceAdapter("rdap_domain"),
-            "crtsh_domain": FakeSourceAdapter("crtsh_domain", fail=True),
-            "wayback_url": FakeSourceAdapter("wayback_url"),
+            "dns_domain": FakeSourceAdapter("dns_domain", fail=True),
         }
     )
     monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
@@ -1598,10 +1601,12 @@ def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
     output = capsys.readouterr().out
     assert "Completed domain investigation" in output
     assert "example.com" in output
-    assert "Sources run: 2" in output
-    assert "Results: 2" in output
-    assert "Failed: 1" in output
-    assert "crtsh_domain: temporary source failure" in output
+    assert "Records discovered: 1" in output
+    assert "Warnings:" in output
+    assert "dns_domain: temporary source failure" in output
+    assert "Next steps:" in output
+    assert "rekos findings case-domain-investigation" in output
+    assert "rekos graph-summary case-domain-investigation" in output
 
     db_path = tmp_path / "rekos_cases" / "case-domain-investigation" / "rekos.db"
     with sqlite3.connect(db_path) as connection:
@@ -1631,16 +1636,16 @@ def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
             "SELECT COUNT(*) FROM relationships"
         ).fetchone()[0]
 
-    assert investigation_row == ("domain", "example.com", 2, 2, 0, 1)
-    assert error_row == ("crtsh_domain", "temporary source failure")
-    assert adapter_sources == ["rdap_domain", "wayback_url"]
+    assert investigation_row == ("domain", "example.com", 1, 1, 0, 1)
+    assert error_row == ("dns_domain", "temporary source failure")
+    assert adapter_sources == ["rdap_domain"]
     assert "example.com" in entity_values
-    assert relationship_count == 2
+    assert relationship_count == 1
 
     assert main(["show-investigation", "case-domain-investigation"]) == 0
     show_output = capsys.readouterr().out
     assert "Domain: example.com" in show_output
-    assert "Sources run: 2" in show_output
+    assert "Sources run: 1" in show_output
     assert "Failed: 1" in show_output
 
 
@@ -1854,6 +1859,120 @@ def test_sources_run_rdap_domain_with_mocked_http(
     assert ("url", "https://rdap.example/entity/abc") in entities
     assert adapter_sources == ["rdap_domain", "rdap_domain"]
     assert "source.run" in event_types
+
+
+def test_investigate_domain_runs_rdap_and_dns_foundation(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rdap_payload = {
+        "objectClassName": "domain",
+        "ldhName": "example.com",
+        "links": [
+            {"href": "https://rdap.verisign.com/com/v1/domain/example.com"},
+            {"href": "https://icann.org/epp"},
+        ],
+    }
+    dns_payloads = {
+        "A": {"Status": 0, "Answer": [{"type": 1, "data": "93.184.216.34"}]},
+        "AAAA": {"Status": 0, "Answer": [{"type": 28, "data": "2606:2800:220:1:248:1893:25c8:1946"}]},
+        "MX": {"Status": 0, "Answer": [{"type": 15, "data": "10 mail.example.com."}]},
+        "NS": {"Status": 0, "Answer": [{"type": 2, "data": "ns1.example.com."}]},
+        "TXT": {
+            "Status": 0,
+            "Answer": [
+                {"type": 16, "data": '"v=spf1 -all"'},
+                {"type": 16, "data": '"txt-two"'},
+                {"type": 16, "data": '"txt-three"'},
+                {"type": 16, "data": '"txt-four"'},
+                {"type": 16, "data": '"txt-five"'},
+                {"type": 16, "data": '"txt-six"'},
+                {"type": 16, "data": '"txt-seven"'},
+            ],
+        },
+    }
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        if request.full_url == "https://rdap.org/domain/example.com":
+            return FakeHttpResponse(200, json.dumps(rdap_payload).encode("utf-8"))
+        for record_type, payload in dns_payloads.items():
+            if request.full_url == f"https://dns.google/resolve?name=example.com&type={record_type}":
+                return FakeHttpResponse(200, json.dumps(payload).encode("utf-8"))
+        raise AssertionError(f"unexpected URL: {request.full_url}")
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-domain-foundation"]) == 0
+    assert main(["investigate", "domain", "case-domain-foundation", "Example.COM"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed domain investigation" in output
+    assert "example.com" in output
+    assert "Records discovered: 14" in output
+    assert "Sources run:" not in output
+    assert "rekos findings case-domain-foundation" in output
+    assert "rekos graph-summary case-domain-foundation" in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-domain-foundation"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        entity_counts = dict(
+            connection.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            ).fetchall()
+        )
+        source_summary = connection.execute(
+            "SELECT target_type, target, source_count, result_count, skipped_count, failed_count FROM source_investigations"
+        ).fetchone()
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence
+            FROM normalized_findings
+            ORDER BY source, value
+            """
+        ).fetchall()
+
+    assert entity_counts["domain"] == 1
+    assert entity_counts["ip"] == 2
+    assert entity_counts["mx"] == 1
+    assert entity_counts["nameserver"] == 1
+    assert entity_counts["source"] == 2
+    assert entity_counts["txt_record"] == 7
+    assert source_summary == ("domain", "example.com", 2, 14, 0, 0)
+    assert ("registration_record", "example.com", "rdap_domain", "high") in finding_rows
+    assert ("dns_record", "A example.com -> 93.184.216.34", "dns_domain", "high") in finding_rows
+    assert ("dns_record", "TXT example.com -> v=spf1 -all", "dns_domain", "medium") in finding_rows
+
+    assert main(["graph-summary", "case-domain-foundation"]) == 0
+    graph_output = capsys.readouterr().out
+    assert "domain" in graph_output
+    assert "ip" in graph_output
+    assert "nameserver" in graph_output
+    assert "mx" in graph_output
+    assert "source" in graph_output
+    assert "Graph links" in graph_output
+    assert "Graph links are internal relationships, not unique findings." in graph_output
+
+    assert main(["findings", "case-domain-foundation"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "Completed findings summary" in findings_output
+    assert "registration_record example.com" in findings_output
+    assert "dns_record" in findings_output
+    assert "A example.com -> 93.184.216.34" in findings_output
+    assert "AAAA example.com -> 2606:2800:220:1:248:1893:25c8:1946" in findings_output
+    assert "MX example.com -> mail.example.com" in findings_output
+    assert "NS example.com -> ns1.example.com" in findings_output
+    assert findings_output.count("TXT example.com ->") == 5
+    assert "... and 2 more TXT records. Run rekos findings case-domain-foundation --verbose for details." in findings_output
+    assert "https://rdap.verisign.com" not in findings_output
+    assert "https://icann.org" not in findings_output
+
+    assert main(["findings", "case-domain-foundation", "--verbose"]) == 0
+    verbose_output = capsys.readouterr().out
+    assert "dns_record: A example.com -> 93.184.216.34" in verbose_output
+    assert "dns_record: TXT example.com -> txt-six" in verbose_output
+    assert "discovered_url: https://rdap.verisign.com/com/v1/domain/example.com" in verbose_output
+    assert "from dns_domain" in verbose_output
 
 
 def test_sources_run_crtsh_domain_with_mocked_http(

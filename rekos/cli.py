@@ -348,13 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "investigate" and args.investigation_type == "domain":
             result = investigate_domain(args.case, args.domain, store)
-            console.print(f"[green]Completed domain investigation[/green] {result.target}")
-            console.print(f"Sources run: {result.sources_run}")
-            console.print(f"Results: {result.results}")
-            console.print(f"Skipped: {result.skipped}")
-            console.print(f"Failed: {result.failed}")
-            for failure in result.failures:
-                console.print(f"- {failure.source}: {failure.error}")
+            _print_domain_investigation_summary(args.case, result)
             return 0
 
         if args.command == "investigate" and args.investigation_type == "url":
@@ -560,10 +554,27 @@ def _print_username_investigation_summary(case: str, result) -> None:
     console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
+def _print_domain_investigation_summary(case: str, result) -> None:
+    console.print(f"[green]Completed domain investigation[/green] {result.target}")
+    console.print(f"Records discovered: {result.results}")
+    if result.failures:
+        console.print()
+        console.print("Warnings:")
+        for failure in result.failures:
+            console.print(f"- {failure.source}: {failure.error}")
+    console.print()
+    console.print("Next steps:")
+    console.print(f"- rekos findings {case}")
+    console.print(f"- rekos findings {case} --verbose")
+    console.print(f"- rekos graph-summary {case}")
+    console.print(f"- rekos export-case {case} --output {case}.zip")
+
+
 def _print_findings_summary(case: str, findings) -> None:
     console.print(f"Completed findings summary for {case}")
+    summary_findings, extra_txt_count = _summary_findings(findings)
     sorted_findings = sorted(
-        _dedupe_summary_findings(findings),
+        summary_findings,
         key=lambda finding: (
             -_confidence_rank(finding.confidence),
             -finding.quality_score,
@@ -580,6 +591,13 @@ def _print_findings_summary(case: str, findings) -> None:
         for finding in group:
             label = _finding_summary_label(finding)
             console.print(f"- {label:<12} {finding.value}", markup=False)
+    if extra_txt_count:
+        console.print("")
+        console.print(
+            f"... and {extra_txt_count} more TXT records. "
+            f"Run rekos findings {case} --verbose for details.",
+            markup=False,
+        )
     console.print("")
     console.print("Details:")
     console.print(f"Run `rekos findings {case} --verbose` for full evidence details.", markup=False)
@@ -612,6 +630,30 @@ def _dedupe_summary_findings(findings):
         if current is None or _summary_sort_score(finding) > _summary_sort_score(current):
             selected[key] = finding
     return list(selected.values())
+
+
+def _summary_findings(findings):
+    summary_findings = []
+    txt_count = 0
+    extra_txt_count = 0
+    for finding in _dedupe_summary_findings(findings):
+        if _is_rdap_technical_url(finding):
+            continue
+        if _is_dns_txt_record(finding):
+            txt_count += 1
+            if txt_count > 5:
+                extra_txt_count += 1
+                continue
+        summary_findings.append(finding)
+    return summary_findings, extra_txt_count
+
+
+def _is_dns_txt_record(finding) -> bool:
+    return finding.finding_type == "dns_record" and finding.value.startswith("TXT ")
+
+
+def _is_rdap_technical_url(finding) -> bool:
+    return finding.finding_type == "discovered_url" and finding.source == "rdap_domain"
 
 
 def _summary_sort_score(finding) -> tuple[int, int, int]:
@@ -682,7 +724,7 @@ def _print_graph_summary(summary) -> None:
     connected_table = Table(title="Most connected", show_header=True)
     connected_table.add_column("Type")
     connected_table.add_column("Value")
-    connected_table.add_column("Links", justify="right")
+    connected_table.add_column("Graph links", justify="right")
     if summary.most_connected:
         for entity in summary.most_connected:
             connected_table.add_row(
@@ -693,6 +735,7 @@ def _print_graph_summary(summary) -> None:
     else:
         connected_table.add_row("None recorded", "", "0")
     console.print(connected_table)
+    console.print("Graph links are internal relationships, not unique findings.")
 
 
 if __name__ == "__main__":

@@ -191,7 +191,7 @@ def investigate_domain(case: str, domain: str, store: CaseStore) -> MultiSourceI
         case=case,
         target_type="domain",
         target=normalized_domain,
-        sources=("rdap_domain", "crtsh_domain", "wayback_url"),
+        sources=("rdap_domain", "dns_domain"),
         entity_type="domain",
         store=store,
     )
