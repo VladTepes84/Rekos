@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 import tomllib
 import uuid
@@ -2057,6 +2059,55 @@ def test_findings_verbose_keeps_full_evidence_details(
     assert "quality" in output
     assert "Confirming sources" in output
     assert "Reason:" in output
+
+
+def test_findings_cli_subprocess_wires_default_and_verbose_output(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-findings-cli"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-findings-cli",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://github.com/alice",
+                platform="github",
+                confidence="high",
+                raw_reference="https://github.com/alice",
+            )
+        ],
+    )
+    capsys.readouterr()
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    default = subprocess.run(
+        [sys.executable, "-m", "rekos.cli", "findings", "case-findings-cli"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    verbose = subprocess.run(
+        [sys.executable, "-m", "rekos.cli", "findings", "case-findings-cli", "--verbose"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert default.returncode == 0
+    assert "Completed findings summary for case-findings-cli" in default.stdout
+    assert "Confirming sources" not in default.stdout
+    assert "Reason:" not in default.stdout
+    assert verbose.returncode == 0
+    assert "discovered_profile: https://github.com/alice" in verbose.stdout
+    assert "Confirming sources" in verbose.stdout
+    assert "Reason:" in verbose.stdout
 
 
 def test_score_calculates_quality_and_labels(
