@@ -137,9 +137,7 @@ def _status_warning(platform: str, status_code: int | None) -> str:
 
 
 def _confidence_for_result(platform: str, item: dict[str, object]) -> str:
-    if platform.strip().lower() == "instagram":
-        return "low"
-    return "medium"
+    return "low"
 
 
 def _raw_reference(item: dict[str, object]) -> str:

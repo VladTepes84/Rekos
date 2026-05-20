@@ -455,7 +455,7 @@ def test_wmn_adapter_parses_mocked_hit() -> None:
             target="alice",
             url="https://github.com/alice",
             platform="github",
-            confidence="medium",
+            confidence="low",
             raw_reference="HTTP status: 200",
         )
     ]
@@ -503,7 +503,7 @@ def test_sources_run_wmn_username_creates_profile_finding(
         "discovered_profile",
         "https://github.com/alice",
         "wmn_username",
-        "medium",
+        "low",
     )
     assert row[4] > 0
 
@@ -1147,22 +1147,61 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         ).fetchall()
 
     assert profile_rows == [
-        ("https://profiles.example/alice", "high"),
+        ("https://profiles.example/alice", "medium"),
         ("https://shared.example/alice", "high"),
-        ("https://maigret.example/alice", "high"),
+        ("https://maigret.example/alice", "medium"),
     ]
     assert adapter_rows == [
-        ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "high"),
+        ("sherlock_username", "alice", "https://profiles.example/alice", "profiles", "medium"),
         ("sherlock_username", "alice", "https://shared.example/alice", "shared", "high"),
         ("maigret_username", "alice", "https://shared.example/alice", "shared", "high"),
-        ("maigret_username", "alice", "https://maigret.example/alice", "maigret", "high"),
+        ("maigret_username", "alice", "https://maigret.example/alice", "maigret", "medium"),
     ]
     assert finding_rows == [
-        ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "high"),
+        ("discovered_profile", "https://profiles.example/alice", "sherlock_username", "medium"),
         ("discovered_profile", "https://shared.example/alice", "sherlock_username", "high"),
         ("discovered_profile", "https://shared.example/alice", "maigret_username", "high"),
-        ("discovered_profile", "https://maigret.example/alice", "maigret_username", "high"),
+        ("discovered_profile", "https://maigret.example/alice", "maigret_username", "medium"),
     ]
+
+
+def test_same_username_different_profile_urls_stays_medium(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: ["/usr/bin/maigret"])
+    monkeypatch.setattr(WmnUsernameAdapter, "run", _empty_wmn)
+    monkeypatch.setattr("rekos.osint.shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        if cmd[0] == "/usr/bin/sherlock":
+            stdout = "https://github.com/alice\n"
+        else:
+            stdout = "https://gitlab.com/alice\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("rekos.osint.subprocess.run", fake_run)
+
+    assert main(["new-case", "case-same-username-different-urls"]) == 0
+    assert main(["investigate", "username", "case-same-username-different-urls", "alice"]) == 0
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-same-username-different-urls" / "rekos.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT source, value, confidence, quality_score, quality_reason
+            FROM normalized_findings
+            WHERE type = 'discovered_profile'
+            ORDER BY source
+            """
+        ).fetchall()
+
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("maigret_username", "https://gitlab.com/alice", "medium"),
+        ("sherlock_username", "https://github.com/alice", "medium"),
+    ]
+    assert all(row[3] < 90 for row in rows)
+    assert all("same URL confirmed" not in row[4] for row in rows)
 
 
 def test_investigate_username_records_missing_maigret_source(

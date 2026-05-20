@@ -90,6 +90,7 @@ class _ScoreContext:
     adapter_targets: dict[tuple[str, str], set[str]]
     source_runs: dict[str, int]
     source_errors: dict[str, int]
+    source_statuses: dict[str, set[str]]
     value_sources: dict[str, set[str]]
     evidence_values: set[str]
     relationship_counts: dict[str, int]
@@ -1969,6 +1970,14 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
             """
         ).fetchall()
     }
+    source_statuses: dict[str, set[str]] = {}
+    for row in connection.execute(
+        "SELECT source, status FROM source_investigation_errors"
+    ).fetchall():
+        source = row["source"].strip()
+        status = row["status"].strip()
+        if source and status:
+            source_statuses.setdefault(source, set()).add(status)
     value_sources: dict[str, set[str]] = {}
     for row in connection.execute(
         "SELECT value, source FROM normalized_findings"
@@ -2003,6 +2012,7 @@ def _score_context(connection: sqlite3.Connection) -> _ScoreContext:
         adapter_targets=adapter_targets,
         source_runs=source_runs,
         source_errors=source_errors,
+        source_statuses=source_statuses,
         value_sources=value_sources,
         evidence_values=evidence_values,
         relationship_counts=relationship_counts,
@@ -2056,6 +2066,16 @@ def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int,
 
     source_run_count = context.source_runs.get(finding.source, 0)
     source_error_count = context.source_errors.get(finding.source, 0)
+    source_statuses = context.source_statuses.get(finding.source, set())
+    if "timeout" in source_statuses:
+        score -= 8
+        reasons.append("source timeout recorded")
+    if "failed" in source_statuses:
+        score -= 6
+        reasons.append("source failure recorded")
+    if "blocked" in source_statuses or "rate_limited" in source_statuses:
+        score -= 12
+        reasons.append("source blocked or rate-limited")
     total_source_events = source_run_count + source_error_count
     if total_source_events:
         error_rate = source_error_count / total_source_events

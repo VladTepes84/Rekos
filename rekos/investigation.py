@@ -61,6 +61,13 @@ class MultiSourceInvestigationResult:
     failures: list[SourceInvestigationFailure]
 
 
+@dataclass(frozen=True)
+class _ProfileCandidate:
+    variant: UsernameVariant
+    export_path: Path
+    result: AdapterResult
+
+
 def investigate_username(
     case: str,
     username: str,
@@ -72,6 +79,7 @@ def investigate_username(
 
     profiles: list[ProfileFinding] = []
     seen_profiles: set[tuple[str, str]] = set()
+    profile_candidates: list[_ProfileCandidate] = []
     attempted_runs: set[tuple[str, str]] = set()
     sources_run = 0
     skipped_count = 0
@@ -128,33 +136,34 @@ def investigate_username(
                 runtime.raw_output,
             )
             source_export_path = adapter._write_source_output(case, run_target, store, runtime.raw_output)
-            adapter_results = [
-                _with_confidence(result, profile_confidence(variant))
-                for result in runtime.parsed_results
-            ]
-            normalized_results = [
-                _with_url(result, _normalize_profile_url(result.url))
-                for result in adapter_results
-            ]
-            store.add_adapter_results(case, normalized_results)
-            for result in adapter_results:
-                normalized_url = _normalize_profile_url(result.url)
-                key = (variant.value, normalized_url)
-                if key in seen_profiles:
-                    continue
-                seen_profiles.add(key)
-                profiles.append(
-                    ProfileFinding(
-                        source_username=variant.value,
-                        profile_url=normalized_url,
-                        confidence=result.confidence,
+            for result in runtime.parsed_results:
+                profile_candidates.append(
+                    _ProfileCandidate(
+                        variant=variant,
                         export_path=source_export_path,
-                        source=result.source,
-                        platform=result.platform,
-                        raw_reference=result.raw_reference,
+                        result=_with_url(result, _normalize_profile_url(result.url)),
                     )
                 )
             sources_run += 1
+
+    normalized_results = _apply_username_confidence_model(profile_candidates)
+    store.add_adapter_results(case, normalized_results)
+    for candidate, result in zip(profile_candidates, normalized_results):
+        key = (candidate.variant.value, result.url)
+        if key in seen_profiles:
+            continue
+        seen_profiles.add(key)
+        profiles.append(
+            ProfileFinding(
+                source_username=candidate.variant.value,
+                profile_url=result.url,
+                confidence=result.confidence,
+                export_path=candidate.export_path,
+                source=result.source,
+                platform=result.platform,
+                raw_reference=result.raw_reference,
+            )
+        )
 
     store.add_username_investigation(
         case,
@@ -221,6 +230,116 @@ def profile_confidence(variant: UsernameVariant) -> str:
     if variant.confidence in {"high", "medium"}:
         return "medium"
     return "low"
+
+
+def _apply_username_confidence_model(candidates: list[_ProfileCandidate]) -> list[AdapterResult]:
+    url_sources: dict[str, set[str]] = {}
+    username_sources: dict[str, set[str]] = {}
+    username_urls: dict[str, set[str]] = {}
+    for candidate in candidates:
+        result = candidate.result
+        url_key = result.url.strip().lower()
+        source = result.source
+        url_sources.setdefault(url_key, set()).add(source)
+        profile_username = _profile_username_from_url(result.url)
+        if profile_username:
+            username_key = _normalize_username_key(profile_username)
+            username_sources.setdefault(username_key, set()).add(source)
+            username_urls.setdefault(username_key, set()).add(url_key)
+
+    modeled: list[AdapterResult] = []
+    for candidate in candidates:
+        result = candidate.result
+        url_key = result.url.strip().lower()
+        profile_username = _profile_username_from_url(result.url)
+        username_key = _normalize_username_key(profile_username)
+        exact_url_sources = url_sources.get(url_key, set())
+        same_username_sources = username_sources.get(username_key, set()) if username_key else set()
+        same_username_urls = username_urls.get(username_key, set()) if username_key else set()
+        confidence = _confidence_from_internal_score(
+            candidate,
+            exact_url_sources=exact_url_sources,
+            same_username_sources=same_username_sources,
+            same_username_urls=same_username_urls,
+        )
+        modeled.append(_with_confidence(result, confidence))
+    return modeled
+
+
+def _confidence_from_internal_score(
+    candidate: _ProfileCandidate,
+    *,
+    exact_url_sources: set[str],
+    same_username_sources: set[str],
+    same_username_urls: set[str],
+) -> str:
+    result = candidate.result
+    score = _variant_confidence_score(candidate.variant)
+
+    if result.source in {"sherlock", "sherlock_username", "maigret", "maigret_username"}:
+        score += 5
+    if result.source == "wmn_username":
+        score -= 30
+    if _raw_reference_is_weak_template(result.raw_reference):
+        score -= 15
+
+    exact_url_confirmed = len(exact_url_sources) > 1
+    same_username_different_urls = (
+        not exact_url_confirmed
+        and len(same_username_sources) > 1
+        and len(same_username_urls) > 1
+    )
+    if exact_url_confirmed:
+        score += 35
+    elif same_username_different_urls:
+        score += 12
+
+    if result.source == "wmn_username" and not exact_url_confirmed:
+        score = min(score, 44)
+    if same_username_different_urls:
+        score = min(score, 65)
+
+    if score >= 75:
+        return "high"
+    if score >= 45:
+        return "medium"
+    return "low"
+
+
+def _variant_confidence_score(variant: UsernameVariant) -> int:
+    if variant.confidence is None:
+        return 70
+    if variant.confidence == "high":
+        return 55
+    if variant.confidence == "medium":
+        return 50
+    return 25
+
+
+def _profile_username_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return ""
+    return parts[-1].lstrip("@")
+
+
+def _normalize_username_key(username: str) -> str:
+    return username.strip().lower().lstrip("@")
+
+
+def _raw_reference_is_weak_template(raw_reference: str) -> bool:
+    lowered = raw_reference.lower()
+    return (
+        "template hit" in lowered
+        or "ambiguous" in lowered
+        or "redirect" in lowered
+        or "blocked" in lowered
+        or "rate-limit" in lowered
+        or "rate limited" in lowered
+    )
 
 
 def _with_confidence(result: AdapterResult, confidence: str) -> AdapterResult:
