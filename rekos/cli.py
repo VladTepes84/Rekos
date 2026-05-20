@@ -320,23 +320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "graph-summary":
             summary = store.graph_summary(args.case)
-            console.print(f"Total entities: {summary.total_entities}")
-            console.print(f"Total relationships: {summary.total_relationships}")
-            console.print("Entity type counts:")
-            if summary.entity_type_counts:
-                for entity_type, count in summary.entity_type_counts.items():
-                    console.print(f"- {entity_type}: {count}")
-            else:
-                console.print("- None recorded")
-            console.print("Most connected entities:")
-            if summary.most_connected:
-                for entity in summary.most_connected:
-                    console.print(
-                        f"- {entity.entity_id} {entity.entity_type}: "
-                        f"{entity.value} ({entity.connection_count})"
-                    )
-            else:
-                console.print("- None recorded")
+            _print_graph_summary(summary)
             return 0
 
         if args.command == "username-variants":
@@ -567,6 +551,37 @@ def _username_failure_warning(failure: SourceInvestigationFailure, username: str
     if failure.source == "maigret_username" and not failure.error.startswith("Missing dependencies"):
         return f"Maigret source failed for {username}; continuing with other sources."
     return failure.error
+
+
+def _print_graph_summary(summary) -> None:
+    console.print("Graph overview")
+    console.print(f"Entities: {summary.total_entities}")
+    console.print(f"Relationships: {summary.total_relationships}")
+
+    type_table = Table(title="Entity types", show_header=True)
+    type_table.add_column("Type")
+    type_table.add_column("Count", justify="right")
+    if summary.entity_type_counts:
+        for entity_type, count in summary.entity_type_counts.items():
+            type_table.add_row(entity_type, str(count))
+    else:
+        type_table.add_row("None recorded", "0")
+    console.print(type_table)
+
+    connected_table = Table(title="Most connected", show_header=True)
+    connected_table.add_column("Type")
+    connected_table.add_column("Value")
+    connected_table.add_column("Links", justify="right")
+    if summary.most_connected:
+        for entity in summary.most_connected:
+            connected_table.add_row(
+                entity.entity_type,
+                entity.value,
+                str(entity.connection_count),
+            )
+    else:
+        connected_table.add_row("None recorded", "", "0")
+    console.print(connected_table)
 
 
 if __name__ == "__main__":

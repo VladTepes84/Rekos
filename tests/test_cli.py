@@ -745,11 +745,15 @@ def test_graph_summary_counts_and_most_connected(
     assert main(["graph-summary", "case-summary"]) == 0
 
     output = capsys.readouterr().out
-    assert "Total entities: 3" in output
-    assert "Total relationships: 2" in output
-    assert "- domain: 1" in output
-    assert "- username: 1" in output
-    assert "example.com (2)" in output
+    assert "Graph overview" in output
+    assert "Entities: 3" in output
+    assert "Relationships: 2" in output
+    assert "Entity types" in output
+    assert "domain" in output
+    assert "username" in output
+    assert "Most connected" in output
+    assert "example.com" in output
+    assert entity_ids[1] not in output
 
 
 def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> None:
