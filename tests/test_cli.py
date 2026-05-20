@@ -418,7 +418,7 @@ def test_maigret_adapter_runs_module_fallback(monkeypatch) -> None:
 
     raw_output = MaigretAdapter().run("case", "alice")
 
-    assert calls == [[sys.executable, "-m", "maigret", "--print-found", "--", "alice"]]
+    assert calls == [[sys.executable, "-m", "maigret", "alice"]]
     assert "https://example.com/alice" in raw_output
 
 
@@ -1089,9 +1089,9 @@ def test_investigate_username_runs_maigret_and_deduplicates(
         assert capture_output is True
         assert text is True
         assert timeout == 120
-        assert cmd[1:3] == ["--print-found", "--"]
-        username = cmd[3]
         if cmd[0] == "/usr/bin/sherlock":
+            assert cmd[1:3] == ["--print-found", "--"]
+            username = cmd[3]
             stdout = "\n".join(
                 [
                     f"https://profiles.example/{username}",
@@ -1099,7 +1099,8 @@ def test_investigate_username_runs_maigret_and_deduplicates(
                 ]
             )
         else:
-            assert cmd[0] == "/usr/bin/maigret"
+            assert cmd == ["/usr/bin/maigret", "alice"]
+            username = cmd[1]
             stdout = "\n".join(
                 [
                     f"https://shared.example/{username}",
