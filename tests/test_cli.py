@@ -2015,6 +2015,97 @@ def test_findings_deduplicate_repeated_source_results(
     ]
 
 
+def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-findings-summary"]) == 0
+
+    store = CaseStore()
+    store.add_adapter_results(
+        "case-findings-summary",
+        [
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.github.com/alice",
+                platform="github",
+                confidence="high",
+                raw_reference="github exact",
+            ),
+            AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url="https://www.github.com/alice/",
+                platform="github",
+                confidence="medium",
+                raw_reference="github trailing slash",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://t.me/alice",
+                platform="telegram",
+                confidence="high",
+                raw_reference="telegram",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://scratch.mit.edu/users/alice",
+                platform="scratch",
+                confidence="high",
+                raw_reference="scratch",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://steamcommunity.com/id/alice",
+                platform="steam",
+                confidence="high",
+                raw_reference="steam",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.tiktok.com/@alice",
+                platform="tiktok",
+                confidence="high",
+                raw_reference="tiktok",
+            ),
+            AdapterResult(
+                source="sherlock_username",
+                target="alice",
+                url="https://www.youtube.com/@alice",
+                platform="youtube",
+                confidence="high",
+                raw_reference="youtube",
+            ),
+        ],
+    )
+    capsys.readouterr()
+
+    assert main(["findings", "case-findings-summary"]) == 0
+    summary_output = capsys.readouterr().out
+    github_lines = [
+        line for line in summary_output.splitlines() if "github.com/alice" in line
+    ]
+    assert len(github_lines) == 1
+    assert "- GitHub" in summary_output
+    assert "- Telegram" in summary_output
+    assert "- Scratch" in summary_output
+    assert "- Steam" in summary_output
+    assert "- TikTok" in summary_output
+    assert "- YouTube" in summary_output
+    assert "Confirming sources" not in summary_output
+
+    assert main(["findings", "case-findings-summary", "--verbose"]) == 0
+    verbose_output = capsys.readouterr().out
+    assert "https://www.github.com/alice" in verbose_output
+    assert "https://www.github.com/alice/" in verbose_output
+    assert "Confirming sources" in verbose_output
+
+
 def test_score_calculates_quality_and_labels(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

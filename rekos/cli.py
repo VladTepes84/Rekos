@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Sequence
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from rich.console import Console
 from rich.table import Table
@@ -562,9 +562,10 @@ def _print_username_investigation_summary(case: str, result) -> None:
 def _print_findings_summary(case: str, findings) -> None:
     console.print(f"Completed findings summary for {case}")
     sorted_findings = sorted(
-        findings,
+        _dedupe_summary_findings(findings),
         key=lambda finding: (
             -_confidence_rank(finding.confidence),
+            -finding.quality_score,
             finding.source,
             finding.value,
         ),
@@ -602,10 +603,56 @@ def _confidence_rank(confidence: str) -> int:
     return {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
 
 
+def _dedupe_summary_findings(findings):
+    selected = {}
+    for finding in findings:
+        key = (finding.finding_type, _summary_value_key(finding.value))
+        current = selected.get(key)
+        if current is None or _summary_sort_score(finding) > _summary_sort_score(current):
+            selected[key] = finding
+    return list(selected.values())
+
+
+def _summary_sort_score(finding) -> tuple[int, int, int]:
+    return (
+        _confidence_rank(finding.confidence),
+        finding.quality_score,
+        finding.confirming_sources_count,
+    )
+
+
+def _summary_value_key(value: str) -> str:
+    parsed = urlparse(value.strip())
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        path = parsed.path.rstrip("/")
+        return urlunparse(
+            (
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                path,
+                "",
+                parsed.query,
+                "",
+            )
+        )
+    return value.strip().lower()
+
+
 def _finding_summary_label(finding) -> str:
     if finding.finding_type == "discovered_profile":
         host = urlparse(finding.value).hostname or ""
-        parts = [part for part in host.split(".") if part]
+        normalized_host = host.lower().removeprefix("www.")
+        known_labels = {
+            "github.com": "GitHub",
+            "tiktok.com": "TikTok",
+            "youtube.com": "YouTube",
+            "t.me": "Telegram",
+            "scratch.mit.edu": "Scratch",
+            "steamcommunity.com": "Steam",
+        }
+        if normalized_host in known_labels:
+            return known_labels[normalized_host]
+        parts = [part for part in normalized_host.split(".") if part]
         if len(parts) >= 2:
             return parts[-2].title()
         if parts:
