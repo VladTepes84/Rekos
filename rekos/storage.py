@@ -2373,6 +2373,7 @@ def _has_profile_shape(value: dict[str, object]) -> bool:
         "confidence",
         "evidence",
         "observed_at",
+        "raw_reference",
     }
     return required.issubset(value)
 

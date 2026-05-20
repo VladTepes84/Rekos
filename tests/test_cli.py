@@ -1157,6 +1157,7 @@ def test_investigate_username_with_mocked_sherlock(
         "confidence",
         "evidence",
         "observed_at",
+        "raw_reference",
     }
     assert all(required_shape.issubset(finding) for finding in structured_findings)
     assert [finding["type"] for finding in structured_findings] == ["discovered_profile"] * 4
@@ -1605,6 +1606,7 @@ def test_username_investigation_e2e_regression_pack(
         "confidence",
         "evidence",
         "observed_at",
+        "raw_reference",
     }
     assert all(required_shape.issubset(item) for item in structured.values())
     assert all(item["status"] == "available" for item in structured.values())
