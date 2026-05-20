@@ -484,8 +484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         status = "available" if available else "missing"
                         console.print(f"  {dependency}: {status}")
                         if not available and dependency == "maigret":
-                            console.print("    Install hint: pipx inject rekos maigret")
-                            console.print("    Or install REKOS with [full]", markup=False)
+                            console.print("    Optional tool missing; REKOS continues without it.")
                 return 0
 
             if args.sources_command == "run":
