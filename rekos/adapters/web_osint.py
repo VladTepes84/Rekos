@@ -17,6 +17,13 @@ from .base import AdapterResult, BaseSourceAdapter, SourceRunResult
 SOURCE_TIMEOUT_SECONDS = 15
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 USER_AGENT = "REKOS passive OSINT source adapter"
+DNS_QUERY_TYPES = {
+    "A": 1,
+    "AAAA": 28,
+    "MX": 15,
+    "NS": 2,
+    "TXT": 16,
+}
 DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
@@ -78,6 +85,120 @@ class RdapDomainAdapter(BaseSourceAdapter):
             )
             for url in _dedupe(urls)
         ]
+
+
+class DnsDomainAdapter(BaseSourceAdapter):
+    name = "dns_domain"
+    description = "Fetch basic public DNS records for a domain over HTTPS DNS."
+    supported_target_types = ("domain",)
+    passive_only = True
+    external_dependencies: tuple[str, ...] = ()
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        domain = normalize_domain(target)
+        raw_output = self.run(case, domain)
+        artifact_path = self._write_source_output(case, domain, store, raw_output)
+        results = self.parse_results(domain, raw_output)
+        store.add_adapter_results(case, results)
+
+        domain_entity = store.ensure_entity(case, "domain", domain, "DNS domain target")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
+        for result in results:
+            record_entity = store.ensure_entity(
+                case,
+                _dns_entity_type(result.platform),
+                result.url,
+                f"DNS {result.platform.upper()} record",
+            )
+            if record_entity.entity_id != domain_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    domain_entity.entity_id,
+                    record_entity.entity_id,
+                    "related_to",
+                    result.confidence,
+                    f"DNS {result.platform.upper()} record",
+                )
+            if record_entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    record_entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "DNS source produced record",
+                )
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {domain}")
+        return SourceRunResult(
+            source=self.name,
+            target=domain,
+            raw_output=raw_output,
+            results=results,
+            artifacts=[artifact_path],
+        )
+
+    def run(self, case: str, target: str) -> str:
+        domain = normalize_domain(target)
+        queries: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for record_type in DNS_QUERY_TYPES:
+            query = urlencode({"name": domain, "type": record_type})
+            try:
+                response = _load_json(fetch_public_text(f"https://dns.google/resolve?{query}"))
+                queries.append({"type": record_type, "response": response})
+            except ExternalToolExecutionError as exc:
+                error = str(exc)
+                errors.append(f"{record_type}: {error}")
+                queries.append({"type": record_type, "error": error})
+        if errors and len(errors) == len(DNS_QUERY_TYPES):
+            raise ExternalToolExecutionError("; ".join(errors))
+        return json.dumps(
+            {
+                "source": self.name,
+                "target": domain,
+                "queries": queries,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
+        domain = normalize_domain(target)
+        parsed = _load_json(raw_output)
+        queries = parsed.get("queries", []) if isinstance(parsed, dict) else []
+        results: list[AdapterResult] = []
+        seen: set[tuple[str, str]] = set()
+        for query in queries:
+            if not isinstance(query, dict):
+                continue
+            record_type = str(query.get("type") or "").upper()
+            response = query.get("response")
+            if record_type not in DNS_QUERY_TYPES or not isinstance(response, dict):
+                continue
+            answers = response.get("Answer", [])
+            if not isinstance(answers, list):
+                continue
+            for answer in answers:
+                if not isinstance(answer, dict):
+                    continue
+                if answer.get("type") != DNS_QUERY_TYPES[record_type]:
+                    continue
+                value = _normalize_dns_value(record_type, str(answer.get("data") or ""))
+                if not value or (record_type, value) in seen:
+                    continue
+                seen.add((record_type, value))
+                raw_reference = f"{record_type} {domain} -> {value}"
+                results.append(
+                    AdapterResult(
+                        source=self.name,
+                        target=domain,
+                        url=value,
+                        platform=record_type.lower(),
+                        confidence="high" if record_type in {"A", "AAAA", "MX", "NS"} else "medium",
+                        raw_reference=raw_reference,
+                    )
+                )
+        return results
 
 
 class CrtshDomainAdapter(BaseSourceAdapter):
@@ -320,6 +441,32 @@ def _extract_wayback_urls(value: Any) -> list[str]:
             continue
         archive_urls.append(f"https://web.archive.org/web/{timestamp}/{original}")
     return _dedupe(archive_urls)
+
+
+def _dns_entity_type(record_type: str) -> str:
+    normalized = record_type.strip().lower()
+    if normalized in {"a", "aaaa"}:
+        return "ip"
+    if normalized == "ns":
+        return "nameserver"
+    if normalized == "mx":
+        return "mx"
+    if normalized == "txt":
+        return "txt_record"
+    return "note"
+
+
+def _normalize_dns_value(record_type: str, value: str) -> str:
+    cleaned = value.strip()
+    if record_type == "MX":
+        parts = cleaned.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].isdigit():
+            cleaned = parts[1]
+    if record_type in {"MX", "NS"}:
+        cleaned = cleaned.rstrip(".")
+    if record_type == "TXT":
+        cleaned = cleaned.strip('"')
+    return cleaned
 
 
 def _rdap_url(domain: str) -> str:

@@ -348,13 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "investigate" and args.investigation_type == "domain":
             result = investigate_domain(args.case, args.domain, store)
-            console.print(f"[green]Completed domain investigation[/green] {result.target}")
-            console.print(f"Sources run: {result.sources_run}")
-            console.print(f"Results: {result.results}")
-            console.print(f"Skipped: {result.skipped}")
-            console.print(f"Failed: {result.failed}")
-            for failure in result.failures:
-                console.print(f"- {failure.source}: {failure.error}")
+            _print_domain_investigation_summary(args.case, result)
             return 0
 
         if args.command == "investigate" and args.investigation_type == "url":
@@ -552,6 +546,22 @@ def _print_username_investigation_summary(case: str, result) -> None:
         console.print("Warnings:")
         for failure in result.failures:
             console.print(f"- {_username_failure_warning(failure, result.username)}")
+    console.print()
+    console.print("Next steps:")
+    console.print(f"- rekos findings {case}")
+    console.print(f"- rekos findings {case} --verbose")
+    console.print(f"- rekos graph-summary {case}")
+    console.print(f"- rekos export-case {case} --output {case}.zip")
+
+
+def _print_domain_investigation_summary(case: str, result) -> None:
+    console.print(f"[green]Completed domain investigation[/green] {result.target}")
+    console.print(f"Records discovered: {result.results}")
+    if result.failures:
+        console.print()
+        console.print("Warnings:")
+        for failure in result.failures:
+            console.print(f"- {failure.source}: {failure.error}")
     console.print()
     console.print("Next steps:")
     console.print(f"- rekos findings {case}")
