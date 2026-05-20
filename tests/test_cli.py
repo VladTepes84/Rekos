@@ -995,6 +995,15 @@ def test_investigate_username_with_mocked_sherlock(
     assert "Completed username investigation" in output
     assert "Variants: 4" in output
     assert "Discovered profiles: 4" in output
+    assert "Next steps:" in output
+    assert "rekos findings case-investigate" in output
+    assert "rekos findings case-investigate --verbose" in output
+    assert "rekos graph-summary case-investigate" in output
+    assert "rekos export-case case-investigate --output case-investigate.zip" in output
+    assert "Confirming sources" not in output
+    assert "Reason:" not in output
+    assert "quality" not in output
+    assert "finding_" not in output
     assert [call[3] for call in calls] == [
         "Alice.Smith",
         "alice.smith",
@@ -1192,7 +1201,7 @@ def test_investigate_username_records_missing_maigret_source(
     assert main(["investigate", "username", "case-maigret-missing-investigate", "alice"]) == 0
 
     output = capsys.readouterr().out
-    assert "Warning:" in output
+    assert "Warnings:" in output
     assert "Missing dependencies for maigret_username" in output
 
     with sqlite3.connect(tmp_path / "rekos_cases" / "case-maigret-missing-investigate" / "rekos.db") as connection:
@@ -1236,7 +1245,7 @@ def test_investigate_username_prints_clean_maigret_runtime_warning(
     assert main(["investigate", "username", "case-maigret-runtime-failure", "peppespan00ac"]) == 0
 
     output = capsys.readouterr().out
-    assert "Warning: Maigret source failed for peppespan00ac; continuing with other sources." in output
+    assert "- Maigret source failed for peppespan00ac; continuing with other sources." in output
     assert "Traceback" not in output
     assert "upstream details" not in output
 
@@ -1291,7 +1300,7 @@ def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     output = capsys.readouterr().out
     assert "Discovered profiles: 1" in output
 
-    assert main(["findings", "case-username-multisource"]) == 0
+    assert main(["findings", "case-username-multisource", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "Confirming sources (3): maigret_username, sherlock_username, wmn_username" in findings_output
 
@@ -1872,7 +1881,7 @@ def test_sources_run_crtsh_domain_with_mocked_http(
         ("discovered_domain", "mail.example.com", "crtsh_domain", "medium"),
     ]
 
-    assert main(["findings", "case-crtsh-source"]) == 0
+    assert main(["findings", "case-crtsh-source", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "certificate_record: www.example.com" in findings_output
     assert "(high)" in findings_output
@@ -2053,7 +2062,7 @@ def test_score_calculates_quality_and_labels(
     assert "low quality label" in weak_score[3]
     assert "does not claim identity ownership" in profile_scores[0][3]
 
-    assert main(["findings", "case-score"]) == 0
+    assert main(["findings", "case-score", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
     assert "quality" in findings_output
     assert "Reason:" in findings_output
