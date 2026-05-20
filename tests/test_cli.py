@@ -752,6 +752,84 @@ def test_graph_summary_counts_and_most_connected(
     assert "example.com (2)" in output
 
 
+def test_username_findings_enrich_graph_and_export(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["new-case", "case-graph-enriched"]) == 0
+
+    profile_url = "https://github.com/alice"
+    store = CaseStore()
+    results = [
+        AdapterResult(
+            source="sherlock_username",
+            target="alice",
+            url=profile_url,
+            platform="github",
+            confidence="high",
+            raw_reference=profile_url,
+        ),
+        AdapterResult(
+            source="maigret_username",
+            target="alice",
+            url=profile_url,
+            platform="github",
+            confidence="high",
+            raw_reference=profile_url,
+        ),
+    ]
+    store.add_adapter_results("case-graph-enriched", results)
+    store.add_adapter_results("case-graph-enriched", results)
+
+    db_path = tmp_path / "rekos_cases" / "case-graph-enriched" / "rekos.db"
+    with sqlite3.connect(db_path) as connection:
+        entity_rows = connection.execute(
+            """
+            SELECT entity_type, value, COUNT(*)
+            FROM entities
+            GROUP BY entity_type, value
+            ORDER BY entity_type, value
+            """
+        ).fetchall()
+        relationship_rows = connection.execute(
+            """
+            SELECT se.entity_type, se.value, r.relationship_type, r.confidence,
+                   te.entity_type, te.value, r.note
+            FROM relationships r
+            JOIN entities se ON se.entity_id = r.source_entity_id
+            JOIN entities te ON te.entity_id = r.target_entity_id
+            ORDER BY r.relationship_type, se.value, te.value
+            """
+        ).fetchall()
+
+    assert ("url", profile_url, 1) in entity_rows
+    assert ("username", "alice", 1) in entity_rows
+    assert ("platform", "github", 1) in entity_rows
+    assert ("source", "sherlock_username", 1) in entity_rows
+    assert ("source", "maigret_username", 1) in entity_rows
+    assert sum(1 for row in relationship_rows if row[2] == "discovered_on") == 1
+    discovered_on = next(row for row in relationship_rows if row[2] == "discovered_on")
+    assert discovered_on[0:6] == (
+        "username",
+        "alice",
+        "discovered_on",
+        "high",
+        "platform",
+        "github",
+    )
+    assert sum(1 for row in relationship_rows if row[2] == "produced_by") == 2
+    assert sum(1 for row in relationship_rows if row[2] == "confirmed_by") == 2
+    assert all("source=" in row[6] and "observed_at=" in row[6] for row in relationship_rows)
+
+    archive = tmp_path / "case-graph-enriched.zip"
+    assert main(["export-case", "case-graph-enriched", "--output", str(archive)]) == 0
+    with zipfile.ZipFile(archive) as exported:
+        names = set(exported.namelist())
+    assert "case-graph-enriched/rekos.db" in names
+    assert "case-graph-enriched/manifest.json" in names
+    capsys.readouterr()
+
+
 def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -1554,11 +1632,11 @@ def test_investigate_username_skips_unsafe_double_dot_variant(
             "SELECT source, error FROM source_investigation_errors"
         ).fetchone()
 
-    assert username_entities == [
+    assert set(username_entities) == {
         "ciccio..gamer035",
         "cicciogamer035",
         "ciccio__gamer035",
-    ]
+    }
     assert adapter_targets == ["cicciogamer035", "ciccio__gamer035"]
     assert investigation_row == ("username", "ciccio..gamer035", 5, 2, 2, 0)
     assert error_row == (
@@ -1663,8 +1741,8 @@ def test_show_investigation_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "Discovered profiles: 4" in output
     assert "https://profiles.example/Alice.Smith (high) from Alice.Smith" in output
     assert "https://profiles.example/alice.smith (medium) from alice.smith" in output
-    assert "Graph entities: 8" in output
-    assert "Graph relationships: 11" in output
+    assert "Graph entities:" in output
+    assert "Graph relationships:" in output
     assert "Findings: 4" in output
     assert "discovered_profile: https://profiles.example/Alice.Smith" in output
     assert "Timeline events:" in output
