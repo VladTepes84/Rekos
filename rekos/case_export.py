@@ -74,7 +74,10 @@ def export_case(case: str, output_path: Path, store: CaseStore) -> ExportResult:
         temp_path.unlink(missing_ok=True)
         raise
 
-    store.record_case_exported(cleaned_case, final_path)
+    if hasattr(store, "record_case_exported"):
+        store.record_case_exported(cleaned_case, final_path)
+    else:
+        store.add_timeline_event(cleaned_case, "case.exported", f"Exported case to {final_path}")
     return ExportResult(output_path=final_path, file_count=len(manifest_entries) + 2)
 
 

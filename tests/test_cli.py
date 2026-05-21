@@ -9,6 +9,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -21,9 +22,11 @@ from rekos.adapters import (
     WmnUsernameAdapter,
 )
 from rekos.adapters.registry import default_registry
+from rekos.adapters.web_osint import normalize_url_or_domain
 from rekos.banner import render_banner
 from rekos.cli import build_parser, main
 from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
+from rekos.snapshots import normalize_public_url
 from rekos.storage import CaseStore, quality_label
 from rekos.usernames import username_variants
 
@@ -143,6 +146,36 @@ def test_export_case_creates_zip_with_manifest(tmp_path: Path, monkeypatch, caps
     assert "case-export/rekos.db" in names
     assert "case-export/manifest.json" in names
     assert "case-export/manifest.sha256" in names
+
+
+def test_validation_module_smoke(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from rekos.validation import validate_case
+
+    store = CaseStore()
+    store.create_case("case-validation-module")
+
+    result = validate_case("case-validation-module", store)
+
+    assert result.ok
+
+
+def test_case_export_module_smoke(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from rekos.case_export import export_case
+
+    store = CaseStore()
+    store.create_case("case-export-module")
+    archive = tmp_path / "case-export-module.zip"
+
+    result = export_case("case-export-module", archive, store)
+
+    assert result.output_path == archive
+    with zipfile.ZipFile(archive) as exported:
+        names = set(exported.namelist())
+    assert "rekos.db" in names
+    assert "manifest.json" in names
+    assert "manifest.sha256" in names
 
 
 def test_passive_osint_commands_are_registered() -> None:
@@ -291,6 +324,7 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
         "rdap_domain",
         "sherlock_username",
         "wayback_url",
+        "web_domain",
         "wmn_username",
     ]
     assert sources["sherlock_username"].supported_target_types == ("username",)
@@ -304,8 +338,49 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["dns_domain"].supported_target_types == ("domain",)
     assert sources["dns_domain"].external_dependencies == ()
     assert sources["rdap_domain"].supported_target_types == ("domain",)
+    assert sources["web_domain"].supported_target_types == ("domain",)
+    assert sources["web_domain"].external_dependencies == ()
     assert sources["crtsh_domain"].supported_target_types == ("domain",)
     assert sources["wayback_url"].supported_target_types == ("url", "domain")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost",
+        "http://localhost.localdomain",
+        "http://127.0.0.1",
+        "http://127.42.0.1",
+        "http://[::1]/",
+        "http://10.0.0.10",
+        "http://172.16.0.1",
+        "http://192.168.1.1",
+        "http://169.254.10.1",
+        "http://169.254.169.254/latest/meta-data",
+        "http://0.0.0.0",
+        "http://224.0.0.1",
+    ],
+)
+def test_snapshot_url_rejects_internal_targets(url: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_public_url(url)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "http://localhost",
+        "https://127.0.0.1",
+        "http://[::1]/",
+        "10.0.0.1",
+        "192.168.1.20",
+        "169.254.169.254",
+        "localhost.localdomain",
+    ],
+)
+def test_url_or_domain_normalization_rejects_internal_targets(target: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_url_or_domain(target)
 
 
 def test_pyproject_uses_single_public_package() -> None:
@@ -557,6 +632,7 @@ def test_add_username_target_creates_variant_graph(
     monkeypatch.setenv("HOME", str(tmp_path))
 
     assert main(["new-case", "case-user-target"]) == 0
+    assert main(["add-username-target", "case-user-target", "Alice.Smith_test"]) == 0
     assert main(["add-username-target", "case-user-target", "Alice.Smith_test"]) == 0
 
     output = capsys.readouterr().out
@@ -952,6 +1028,8 @@ def test_list_sources_shows_status_findings_and_errors(
         {
             "rdap_domain": FakeSourceAdapter("rdap_domain"),
             "dns_domain": FakeSourceAdapter("dns_domain", fail=True),
+            "web_domain": FakeSourceAdapter("web_domain"),
+            "crtsh_domain": FakeSourceAdapter("crtsh_domain"),
         }
     )
     monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
@@ -969,6 +1047,22 @@ def test_list_sources_shows_status_findings_and_errors(
     assert "dns_domain" in output
     assert "failed" in output
     assert "temporary source failure" in output
+    assert "web_domain" in output
+
+
+def test_source_runs_keep_per_run_counts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = CaseStore()
+    store.create_case("case-source-run-counts")
+    store.add_source_run("case-source-run-counts", "web_domain", "a.example", "ok", 1)
+    store.add_source_run("case-source-run-counts", "web_domain", "b.example", "ok", 3)
+
+    runs = store.source_runs("case-source-run-counts")
+
+    assert [(run.target, run.findings_count) for run in runs] == [
+        ("a.example", 1),
+        ("b.example", 3),
+    ]
 
 
 def test_investigate_username_with_mocked_sherlock(
@@ -1593,6 +1687,8 @@ def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
         {
             "rdap_domain": FakeSourceAdapter("rdap_domain"),
             "dns_domain": FakeSourceAdapter("dns_domain", fail=True),
+            "web_domain": FakeSourceAdapter("web_domain"),
+            "crtsh_domain": FakeSourceAdapter("crtsh_domain"),
         }
     )
     monkeypatch.setattr("rekos.investigation.default_registry", lambda: registry)
@@ -1603,7 +1699,7 @@ def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
     output = capsys.readouterr().out
     assert "Completed domain investigation" in output
     assert "example.com" in output
-    assert "Records discovered: 1" in output
+    assert "Records discovered: 3" in output
     assert "Warnings:" in output
     assert "dns_domain: temporary source failure" in output
     assert "Next steps:" in output
@@ -1638,16 +1734,16 @@ def test_investigate_domain_orchestrates_sources_and_continues_on_failure(
             "SELECT COUNT(*) FROM relationships"
         ).fetchone()[0]
 
-    assert investigation_row == ("domain", "example.com", 1, 1, 0, 1)
+    assert investigation_row == ("domain", "example.com", 3, 3, 0, 1)
     assert error_row == ("dns_domain", "temporary source failure")
-    assert adapter_sources == ["rdap_domain"]
+    assert adapter_sources == ["rdap_domain", "web_domain", "crtsh_domain"]
     assert "example.com" in entity_values
-    assert relationship_count == 1
+    assert relationship_count == 3
 
     assert main(["show-investigation", "case-domain-investigation"]) == 0
     show_output = capsys.readouterr().out
     assert "Domain: example.com" in show_output
-    assert "Sources run: 1" in show_output
+    assert "Sources run: 3" in show_output
     assert "Failed: 1" in show_output
 
 
@@ -1744,10 +1840,18 @@ def test_report_renders_investigation_summary(
 
 
 class FakeHttpResponse:
-    def __init__(self, status: int = 200, body: bytes = b"<html>ok</html>") -> None:
+    def __init__(
+        self,
+        status: int = 200,
+        body: bytes = b"<html>ok</html>",
+        *,
+        final_url: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status = status
-        self.headers = {"Content-Type": "text/html; charset=utf-8", "X-Test": "yes"}
+        self.headers = headers or {"Content-Type": "text/html; charset=utf-8", "X-Test": "yes"}
         self._body = body
+        self._final_url = final_url
 
     def __enter__(self):
         return self
@@ -1757,6 +1861,9 @@ class FakeHttpResponse:
 
     def read(self, _limit: int) -> bytes:
         return self._body
+
+    def geturl(self) -> str:
+        return self._final_url
 
 
 def test_sources_run_http_snapshot_with_mocked_http(
@@ -1883,7 +1990,7 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
         "TXT": {
             "Status": 0,
             "Answer": [
-                {"type": 16, "data": '"v=spf1 -all"'},
+                {"type": 16, "data": '"v=spf1 include:spf.protection.outlook.com -all"'},
                 {"type": 16, "data": '"txt-two"'},
                 {"type": 16, "data": '"txt-three"'},
                 {"type": 16, "data": '"txt-four"'},
@@ -1901,9 +2008,34 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
         for record_type, payload in dns_payloads.items():
             if request.full_url == f"https://dns.google/resolve?name=example.com&type={record_type}":
                 return FakeHttpResponse(200, json.dumps(payload).encode("utf-8"))
+        if request.full_url == "https://example.com":
+            return FakeHttpResponse(
+                200,
+                b"<html><head><title>Example Domain</title></head><body>ok</body></html>",
+                final_url="https://example.com",
+                headers={"Content-Type": "text/html; charset=utf-8", "Server": "example-server"},
+            )
+        if request.full_url == "http://example.com":
+            return FakeHttpResponse(
+                200,
+                b"<html><head><title>Example Domain</title></head><body>ok</body></html>",
+                final_url="https://example.com",
+                headers={"Content-Type": "text/html; charset=utf-8", "Server": "example-server"},
+            )
+        if request.full_url.startswith("https://crt.sh/?"):
+            return FakeHttpResponse(200, b"[]", headers={"Content-Type": "application/json"})
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
     monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "rekos.adapters.web_osint._tls_certificate_summary",
+        lambda domain: {
+            "subject": f"www.{domain}",
+            "issuer": "Example CA",
+            "not_before": "Jan  1 00:00:00 2026 GMT",
+            "not_after": "Jan  1 00:00:00 2027 GMT",
+        },
+    )
 
     assert main(["new-case", "case-domain-foundation"]) == 0
     assert main(["investigate", "domain", "case-domain-foundation", "Example.COM"]) == 0
@@ -1911,7 +2043,7 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     output = capsys.readouterr().out
     assert "Completed domain investigation" in output
     assert "example.com" in output
-    assert "Records discovered: 14" in output
+    assert "Records discovered: 20" in output
     assert "Sources run:" not in output
     assert "rekos findings case-domain-foundation" in output
     assert "rekos graph-summary case-domain-foundation" in output
@@ -1938,12 +2070,27 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert entity_counts["ip"] == 2
     assert entity_counts["mx"] == 1
     assert entity_counts["nameserver"] == 1
-    assert entity_counts["source"] == 2
+    assert entity_counts["source"] == 3
     assert entity_counts["txt_record"] == 7
-    assert source_summary == ("domain", "example.com", 2, 14, 0, 0)
+    assert entity_counts["mail_security"] == 1
+    assert entity_counts["provider"] == 1
+    assert entity_counts["web_endpoint"] == 2
+    assert entity_counts["http_redirect"] == 1
+    assert entity_counts["tls_certificate"] == 1
+    assert source_summary == ("domain", "example.com", 4, 20, 0, 0)
     assert ("registration_record", "example.com", "rdap_domain", "high") in finding_rows
     assert ("dns_record", "A example.com -> 93.184.216.34", "dns_domain", "high") in finding_rows
-    assert ("dns_record", "TXT example.com -> v=spf1 -all", "dns_domain", "medium") in finding_rows
+    assert (
+        "dns_record",
+        "TXT example.com -> v=spf1 include:spf.protection.outlook.com -all",
+        "dns_domain",
+        "medium",
+    ) in finding_rows
+    assert any(row[0] == "mail_security" and row[2] == "dns_domain" for row in finding_rows)
+    assert any(row[0] == "provider_hint" and "Microsoft 365" in row[1] for row in finding_rows)
+    assert any(row[0] == "web_endpoint" and "Example Domain" in row[1] for row in finding_rows)
+    assert any(row[0] == "http_redirect" and "http://example.com -> https://example.com" in row[1] for row in finding_rows)
+    assert any(row[0] == "tls_certificate" and "Example CA" in row[1] for row in finding_rows)
 
     assert main(["graph-summary", "case-domain-foundation"]) == 0
     graph_output = capsys.readouterr().out
@@ -1952,6 +2099,10 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert "nameserver" in graph_output
     assert "mx" in graph_output
     assert "source" in graph_output
+    assert "web_endpoint" in graph_output
+    assert "tls_certificate" in graph_output
+    assert "provider" in graph_output
+    assert "Scope: targets, sources, DNS, web, TLS, providers, evidence links." in graph_output
     assert "Graph links" in graph_output
     assert "Graph links are internal relationships, not unique findings." in graph_output
 
@@ -1964,6 +2115,10 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert "AAAA example.com -> 2606:2800:220:1:248:1893:25c8:1946" in findings_output
     assert "MX example.com -> mail.example.com" in findings_output
     assert "NS example.com -> ns1.example.com" in findings_output
+    assert "web_endpoint" in findings_output
+    assert "tls_certificate" in findings_output
+    assert "mail_security" in findings_output
+    assert "provider_hint" in findings_output
     assert findings_output.count("TXT example.com ->") == 5
     assert "... and 2 more TXT records. Run rekos findings case-domain-foundation --verbose for details." in findings_output
     assert "https://rdap.verisign.com" not in findings_output
@@ -1973,8 +2128,126 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     verbose_output = capsys.readouterr().out
     assert "dns_record: A example.com -> 93.184.216.34" in verbose_output
     assert "dns_record: TXT example.com -> txt-six" in verbose_output
+    assert "mail_security: SPF example.com" in verbose_output
+    assert "provider_hint: Microsoft 365 provider hint" in verbose_output
+    assert "web_endpoint: https://example.com -> https://example.com" in verbose_output
+    assert "tls_certificate: TLS example.com" in verbose_output
     assert "discovered_url: https://rdap.verisign.com/com/v1/domain/example.com" in verbose_output
     assert "from dns_domain" in verbose_output
+
+
+def test_investigate_domain_uses_rdap_it_fallback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        if request.full_url == "https://rdap.org/domain/r1spa.it":
+            raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
+        if request.full_url == "https://rdap.nic.it/domain/r1spa.it":
+            return FakeHttpResponse(
+                200,
+                json.dumps({"objectClassName": "domain", "ldhName": "r1spa.it"}).encode("utf-8"),
+            )
+        if request.full_url.startswith("https://dns.google/resolve?name=r1spa.it&type="):
+            return FakeHttpResponse(200, json.dumps({"Status": 0, "Answer": []}).encode("utf-8"))
+        if request.full_url in {"https://r1spa.it", "http://r1spa.it"}:
+            return FakeHttpResponse(
+                200,
+                b"<html><head><title>R1 SPA</title></head></html>",
+                final_url=request.full_url,
+            )
+        if request.full_url.startswith("https://crt.sh/?"):
+            return FakeHttpResponse(200, b"[]", headers={"Content-Type": "application/json"})
+        raise AssertionError(f"unexpected URL: {request.full_url}")
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "rekos.adapters.web_osint._tls_certificate_summary",
+        lambda domain: {
+            "subject": domain,
+            "issuer": "IT Test CA",
+            "not_before": "Jan  1 00:00:00 2026 GMT",
+            "not_after": "Jan  1 00:00:00 2027 GMT",
+        },
+    )
+
+    assert main(["new-case", "case-rdap-it-fallback"]) == 0
+    assert main(["investigate", "domain", "case-rdap-it-fallback", "r1spa.it"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed domain investigation r1spa.it" in output
+    assert "Warnings:" not in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-rdap-it-fallback"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        rdap_urls = connection.execute(
+            "SELECT url FROM adapter_results WHERE source = 'rdap_domain'"
+        ).fetchall()
+        source_summary = connection.execute(
+            "SELECT source_count, failed_count FROM source_investigations"
+        ).fetchone()
+
+    assert ("https://rdap.nic.it/domain/r1spa.it",) in rdap_urls
+    assert source_summary == (4, 0)
+
+
+def test_investigate_domain_uses_whois_it_fallback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        if request.full_url in {
+            "https://rdap.org/domain/r1spa.it",
+            "https://rdap.nic.it/domain/r1spa.it",
+        }:
+            raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
+        if request.full_url == "https://data.iana.org/rdap/dns.json":
+            return FakeHttpResponse(200, json.dumps({"services": []}).encode("utf-8"))
+        if request.full_url.startswith("https://dns.google/resolve?name=r1spa.it&type="):
+            return FakeHttpResponse(200, json.dumps({"Status": 0, "Answer": []}).encode("utf-8"))
+        if request.full_url in {"https://r1spa.it", "http://r1spa.it"}:
+            return FakeHttpResponse(
+                200,
+                b"<html><head><title>R1 SPA</title></head></html>",
+                final_url=request.full_url,
+            )
+        if request.full_url.startswith("https://crt.sh/?"):
+            return FakeHttpResponse(200, b"[]", headers={"Content-Type": "application/json"})
+        raise AssertionError(f"unexpected URL: {request.full_url}")
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "rekos.adapters.web_osint._whois_lookup",
+        lambda domain, server: f"Domain: {domain}\nStatus: ok\nRegistrar: Example Registrar\n",
+    )
+    monkeypatch.setattr(
+        "rekos.adapters.web_osint._tls_certificate_summary",
+        lambda domain: {
+            "subject": domain,
+            "issuer": "IT Test CA",
+            "not_before": "Jan  1 00:00:00 2026 GMT",
+            "not_after": "Jan  1 00:00:00 2027 GMT",
+        },
+    )
+
+    assert main(["new-case", "case-whois-it-fallback"]) == 0
+    assert main(["investigate", "domain", "case-whois-it-fallback", "r1spa.it"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed domain investigation r1spa.it" in output
+    assert "Warnings:" not in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-whois-it-fallback"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        rdap_urls = connection.execute(
+            "SELECT url FROM adapter_results WHERE source = 'rdap_domain'"
+        ).fetchall()
+
+    assert ("whois://whois.nic.it/domain/r1spa.it",) in rdap_urls
 
 
 def test_sources_run_crtsh_domain_with_mocked_http(

@@ -57,6 +57,11 @@ ALLOWED_ENTITY_TYPES = {
     "nameserver",
     "mx",
     "txt_record",
+    "web_endpoint",
+    "http_redirect",
+    "tls_certificate",
+    "mail_security",
+    "provider",
 }
 ALLOWED_RELATIONSHIP_TYPES = {
     "related_to",
@@ -89,6 +94,11 @@ ALLOWED_FINDING_TYPES = {
     "registration_record",
     "certificate_record",
     "dns_record",
+    "web_endpoint",
+    "http_redirect",
+    "tls_certificate",
+    "mail_security",
+    "provider_hint",
 }
 
 
@@ -426,27 +436,23 @@ class CaseStore:
     def add_username_target(self, case: str, username: str) -> tuple[EntityRecord, list[EntityRecord]]:
         variants = username_variants(username)
         original_variant = variants[0]
-        original_record = self._entity_record("username", original_variant.value, "original username target")
-        variant_records = [
-            self._entity_record("username", variant.value, "username variant")
-            for variant in variants[1:]
-        ]
-
         with self.connection_for_case(case) as connection:
-            self._insert_entity(connection, original_record)
-            self._insert_timeline_event(
+            original_record = self._ensure_entity_in_connection(
                 connection,
-                "entity.created",
-                f"Created username entity {original_record.value}",
+                "username",
+                original_variant.value,
+                "original username target",
             )
-            for variant, record in zip(variants[1:], variant_records):
-                self._insert_entity(connection, record)
-                self._insert_timeline_event(
+            variant_records: list[EntityRecord] = []
+            for variant in variants[1:]:
+                record = self._ensure_entity_in_connection(
                     connection,
-                    "entity.created",
-                    f"Created username variant entity {record.value}",
+                    "username",
+                    variant.value,
+                    "username variant",
                 )
-                self._insert_relationship(
+                variant_records.append(record)
+                self._ensure_relationship_in_connection(
                     connection,
                     source_entity_id=original_record.entity_id,
                     target_entity_id=record.entity_id,
@@ -825,6 +831,26 @@ class CaseStore:
 
     def source_runs(self, case: str) -> list[SourceRunRecord]:
         with self.connection_for_case(case) as connection:
+            explicit_runs = [
+                SourceRunRecord(
+                    source=row["source"],
+                    target=row["target"],
+                    status=row["status"],
+                    findings_count=row["result_count"],
+                    error=row["error"],
+                    created_at=row["created_at"],
+                )
+                for row in connection.execute(
+                    """
+                    SELECT source, target, status, result_count, error, created_at
+                    FROM source_runs
+                    ORDER BY created_at, source, target
+                    """
+                ).fetchall()
+            ]
+            if explicit_runs:
+                return explicit_runs
+
             finding_counts = {
                 row["source"]: row["count"]
                 for row in connection.execute(
@@ -875,6 +901,58 @@ class CaseStore:
                 ).fetchall()
             ]
         return [*runs, *error_runs]
+
+    def add_source_run(
+        self,
+        case: str,
+        source: str,
+        target: str,
+        status: str,
+        result_count: int,
+        error: str = "",
+    ) -> SourceRunRecord:
+        cleaned_source = source.strip()
+        cleaned_target = target.strip()
+        cleaned_status = status.strip().lower()
+        cleaned_error = error.strip()
+        if cleaned_status not in {"ok", "failed", "skipped"}:
+            raise ValueError("Source run status must be ok, failed, or skipped.")
+        if not cleaned_source:
+            raise ValueError("Source run source cannot be empty.")
+        if not cleaned_target:
+            raise ValueError("Source run target cannot be empty.")
+        created_at = utc_now_iso()
+        count = max(0, int(result_count))
+        with self.connection_for_case(case) as connection:
+            connection.execute(
+                """
+                INSERT INTO source_runs (
+                    source,
+                    target,
+                    status,
+                    result_count,
+                    error,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cleaned_source,
+                    cleaned_target,
+                    cleaned_status,
+                    count,
+                    cleaned_error,
+                    created_at,
+                ),
+            )
+        return SourceRunRecord(
+            source=cleaned_source,
+            target=cleaned_target,
+            status=cleaned_status,
+            findings_count=count,
+            error=cleaned_error,
+            created_at=created_at,
+        )
 
     def recent_snapshot(
         self,
@@ -1312,6 +1390,16 @@ class CaseStore:
                 platform TEXT NOT NULL,
                 confidence TEXT NOT NULL,
                 raw_reference TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS source_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_count INTEGER NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
 
@@ -2145,7 +2233,7 @@ def _score_finding(finding: FindingRecord, context: _ScoreContext) -> tuple[int,
     normalized_usernames = {_normalize_username(username) for username in context.usernames}
     weak_usernames = {_compact_username(username) for username in context.usernames}
     profile_username = _username_from_profile_url(finding.value)
-    if profile_username:
+    if finding.finding_type == "discovered_profile" and profile_username:
         match_score, match_reason = _profile_username_score(
             finding,
             profile_username,
@@ -2335,6 +2423,28 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
             continue
 
         if source == "dns_domain":
+            if result.platform == "mail_security":
+                findings.append(
+                    _FindingInput(
+                        finding_type="mail_security",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "provider_hint":
+                findings.append(
+                    _FindingInput(
+                        finding_type="provider_hint",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
             findings.append(
                 _FindingInput(
                     finding_type="dns_record",
@@ -2344,6 +2454,20 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
                     raw_reference=result.raw_reference,
                 )
             )
+            continue
+
+        if source == "web_domain":
+            finding_type = result.platform
+            if finding_type in {"web_endpoint", "http_redirect", "tls_certificate"}:
+                findings.append(
+                    _FindingInput(
+                        finding_type=finding_type,
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
             continue
 
         if source == "crtsh_domain":

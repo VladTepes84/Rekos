@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import ssl
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from rekos.errors import ExternalToolExecutionError
+from rekos.public_targets import normalize_public_http_url, validate_public_host
 
 from .base import AdapterResult, BaseSourceAdapter, SourceRunResult
 
@@ -30,6 +33,14 @@ DOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+PROVIDER_HINTS = {
+    "microsoft 365": ("spf.protection.outlook.com", "ms=", "microsoft"),
+    "google": ("_spf.google.com", "google-site-verification", "google.com"),
+    "atlassian": ("atlassian-domain-verification", "atlassian"),
+    "brevo": ("brevo", "sendinblue"),
+    "esva": ("esvacloud", "esva"),
+}
 
 
 class RdapDomainAdapter(BaseSourceAdapter):
@@ -79,18 +90,74 @@ class RdapDomainAdapter(BaseSourceAdapter):
 
     def run(self, case: str, target: str) -> str:
         domain = normalize_domain(target)
-        return fetch_public_text(f"https://rdap.org/domain/{quote(domain)}")
+        attempts = _rdap_candidate_urls(domain)
+        errors: list[str] = []
+        for url in attempts:
+            try:
+                response = fetch_public_text(url)
+                return json.dumps(
+                    {
+                        "source": self.name,
+                        "target": domain,
+                        "endpoint": url,
+                        "response": _load_json(response),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            except ExternalToolExecutionError as exc:
+                errors.append(f"{url}: {exc}")
+        for url in _rdap_bootstrap_urls(domain):
+            if url in attempts:
+                continue
+            try:
+                response = fetch_public_text(url)
+                return json.dumps(
+                    {
+                        "source": self.name,
+                        "target": domain,
+                        "endpoint": url,
+                        "response": _load_json(response),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            except ExternalToolExecutionError as exc:
+                errors.append(f"{url}: {exc}")
+        if domain.endswith(".it"):
+            whois_endpoint = f"whois://whois.nic.it/domain/{domain}"
+            try:
+                response = _whois_lookup(domain, "whois.nic.it")
+                return json.dumps(
+                    {
+                        "source": self.name,
+                        "target": domain,
+                        "endpoint": whois_endpoint,
+                        "response": response,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            except ExternalToolExecutionError as exc:
+                errors.append(f"{whois_endpoint}: {exc}")
+        raise ExternalToolExecutionError(f"RDAP lookup failed for {domain}: {'; '.join(errors)}")
 
     def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
         domain = normalize_domain(target)
-        urls = [_rdap_url(domain), *_extract_urls(_load_json(raw_output))]
+        parsed = _load_json(raw_output)
+        endpoint = _rdap_url(domain)
+        response: Any = parsed
+        if isinstance(parsed, dict) and parsed.get("source") == self.name:
+            endpoint = str(parsed.get("endpoint") or endpoint)
+            response = parsed.get("response")
+        urls = [endpoint, *_extract_urls(response)]
         return [
             AdapterResult(
                 source=self.name,
                 target=domain,
                 url=url,
                 platform=_platform_from_url(url),
-                confidence="high" if url == _rdap_url(domain) else "medium",
+                confidence="high" if url == endpoint else "medium",
                 raw_reference=url,
             )
             for url in _dedupe(urls)
@@ -208,6 +275,130 @@ class DnsDomainAdapter(BaseSourceAdapter):
                         raw_reference=raw_reference,
                     )
                 )
+                if record_type == "TXT":
+                    results.extend(_txt_enrichment_results(domain, value))
+        return results
+
+
+class WebDomainAdapter(BaseSourceAdapter):
+    name = "web_domain"
+    description = "Probe public HTTP/HTTPS endpoints and TLS certificate metadata for a domain."
+    supported_target_types = ("domain",)
+    passive_only = True
+    external_dependencies: tuple[str, ...] = ()
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        domain = normalize_domain(target)
+        raw_output = self.run(case, domain)
+        artifact_path = self._write_source_output(case, domain, store, raw_output)
+        results = self.parse_results(domain, raw_output)
+        store.add_adapter_results(case, results)
+
+        domain_entity = store.ensure_entity(case, "domain", domain, "Web domain target")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
+        for result in results:
+            entity_type = _web_entity_type(result.platform)
+            entity = store.ensure_entity(
+                case,
+                entity_type,
+                result.url,
+                f"Web domain {result.platform} observation",
+            )
+            if entity.entity_id != domain_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    domain_entity.entity_id,
+                    entity.entity_id,
+                    "related_to",
+                    result.confidence,
+                    f"Web domain {result.platform} observation",
+                )
+            if entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "Web source produced observation",
+                )
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {domain}")
+        return SourceRunResult(
+            source=self.name,
+            target=domain,
+            raw_output=raw_output,
+            results=results,
+            artifacts=[artifact_path],
+        )
+
+    def run(self, case: str, target: str) -> str:
+        domain = normalize_domain(target)
+        probes = [_probe_http_endpoint(f"https://{domain}"), _probe_http_endpoint(f"http://{domain}")]
+        return json.dumps(
+            {
+                "source": self.name,
+                "target": domain,
+                "probes": probes,
+                "tls": _tls_certificate_summary(domain),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
+        domain = normalize_domain(target)
+        parsed = _load_json(raw_output)
+        if not isinstance(parsed, dict):
+            return []
+        results: list[AdapterResult] = []
+        for probe in parsed.get("probes", []):
+            if not isinstance(probe, dict) or probe.get("error"):
+                continue
+            requested_url = str(probe.get("url") or "")
+            final_url = str(probe.get("final_url") or requested_url)
+            status = probe.get("status")
+            if final_url:
+                parts = [f"status={status}"]
+                title = str(probe.get("title") or "").strip()
+                server = str(probe.get("server") or "").strip()
+                if title:
+                    parts.append(f"title={title}")
+                if server:
+                    parts.append(f"server={server}")
+                results.append(
+                    AdapterResult(
+                        source=self.name,
+                        target=domain,
+                        url=f"{requested_url} -> {final_url} ({', '.join(parts)})",
+                        platform="web_endpoint",
+                        confidence="medium",
+                        raw_reference=json.dumps(probe, sort_keys=True),
+                    )
+                )
+            if requested_url and final_url and requested_url.rstrip("/") != final_url.rstrip("/"):
+                results.append(
+                    AdapterResult(
+                        source=self.name,
+                        target=domain,
+                        url=f"{requested_url} -> {final_url}",
+                        platform="http_redirect",
+                        confidence="medium",
+                        raw_reference=json.dumps(probe, sort_keys=True),
+                    )
+                )
+        tls = parsed.get("tls")
+        if isinstance(tls, dict) and not tls.get("error"):
+            summary = _format_tls_result(domain, tls)
+            results.append(
+                AdapterResult(
+                    source=self.name,
+                    target=domain,
+                    url=summary,
+                    platform="tls_certificate",
+                    confidence="medium",
+                    raw_reference=json.dumps(tls, sort_keys=True),
+                )
+            )
         return results
 
 
@@ -361,6 +552,25 @@ def fetch_public_text(url: str) -> str:
     return body.decode(_charset(headers), errors="replace")
 
 
+def _fetch_public_bytes(url: str) -> tuple[int, str, dict[str, str], bytes]:
+    request = Request(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=SOURCE_TIMEOUT_SECONDS) as response:
+            body = response.read(MAX_SOURCE_BYTES)
+            headers = dict(response.headers.items())
+            status = int(getattr(response, "status", 0) or getattr(response, "getcode", lambda: 0)())
+            final_url = str(getattr(response, "geturl", lambda: url)() or url)
+    except HTTPError as exc:
+        body = exc.read(MAX_SOURCE_BYTES)
+        headers = dict(exc.headers.items()) if exc.headers else {}
+        return int(exc.code), str(exc.geturl() or url), headers, body
+    return status, final_url, headers, body
+
+
 def normalize_domain(target: str) -> str:
     cleaned = target.strip().lower().rstrip(".")
     if not cleaned:
@@ -372,6 +582,7 @@ def normalize_domain(target: str) -> str:
         cleaned = cleaned.encode("idna").decode("ascii")
     except UnicodeError as exc:
         raise ValueError("Domain target is not valid IDNA.") from exc
+    validate_public_host(cleaned)
     if not DOMAIN_RE.fullmatch(cleaned):
         raise ValueError("Domain target is not a valid public domain.")
     return cleaned
@@ -380,17 +591,176 @@ def normalize_domain(target: str) -> str:
 def normalize_url_or_domain(target: str) -> str:
     cleaned = target.strip()
     if _is_http_url(cleaned):
-        parsed = urlparse(cleaned)
-        if not parsed.hostname:
-            raise ValueError("URL target must include a host.")
-        if parsed.username or parsed.password:
-            raise ValueError("URL target must not include credentials.")
-        return cleaned
+        return normalize_public_http_url(cleaned)
     return normalize_domain(cleaned)
 
 
 def _is_http_url(value: str) -> bool:
     return urlparse(value).scheme in {"http", "https"}
+
+
+def _rdap_candidate_urls(domain: str) -> list[str]:
+    primary = _rdap_url(domain)
+    candidates = [primary]
+    if domain.endswith(".it"):
+        candidates.append(f"https://rdap.nic.it/domain/{quote(domain)}")
+    return _dedupe(candidates)
+
+
+def _rdap_bootstrap_urls(domain: str) -> list[str]:
+    tld = domain.rsplit(".", 1)[-1]
+    try:
+        bootstrap = _load_json(fetch_public_text("https://data.iana.org/rdap/dns.json"))
+    except ExternalToolExecutionError:
+        return []
+    services = bootstrap.get("services", []) if isinstance(bootstrap, dict) else []
+    candidates: list[str] = []
+    for service in services:
+        if not isinstance(service, list) or len(service) != 2:
+            continue
+        tlds, urls = service
+        if not isinstance(tlds, list) or not isinstance(urls, list):
+            continue
+        if tld not in {str(item).lower().lstrip(".") for item in tlds}:
+            continue
+        for base_url in urls:
+            if isinstance(base_url, str) and base_url.startswith("https://"):
+                candidates.append(f"{base_url.rstrip('/')}/domain/{quote(domain)}")
+    return candidates
+
+
+def _probe_http_endpoint(url: str) -> dict[str, Any]:
+    try:
+        status, final_url, headers, body = _fetch_public_bytes(url)
+    except (OSError, TimeoutError, URLError, ExternalToolExecutionError) as exc:
+        return {"url": url, "error": str(exc)}
+    text = body.decode(_charset(headers), errors="replace")
+    return {
+        "url": url,
+        "status": status,
+        "final_url": final_url,
+        "title": _extract_title(text),
+        "server": _header_value(headers, "server"),
+        "content_type": _header_value(headers, "content-type"),
+        "headers": _selected_headers(headers),
+    }
+
+
+def _tls_certificate_summary(domain: str) -> dict[str, str]:
+    context = ssl.create_default_context()
+    try:
+        with socket.create_connection((domain, 443), timeout=SOURCE_TIMEOUT_SECONDS) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as tls:
+                cert = tls.getpeercert()
+    except (OSError, TimeoutError, ssl.SSLError) as exc:
+        return {"error": str(exc)}
+    return {
+        "subject": _certificate_name(cert.get("subject", ())),
+        "issuer": _certificate_name(cert.get("issuer", ())),
+        "not_before": str(cert.get("notBefore", "")),
+        "not_after": str(cert.get("notAfter", "")),
+    }
+
+
+def _whois_lookup(domain: str, server: str) -> str:
+    try:
+        with socket.create_connection((server, 43), timeout=SOURCE_TIMEOUT_SECONDS) as sock:
+            sock.sendall(f"{domain}\r\n".encode("ascii"))
+            chunks: list[bytes] = []
+            total = 0
+            while total < MAX_SOURCE_BYTES:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except (OSError, TimeoutError) as exc:
+        raise ExternalToolExecutionError(f"WHOIS lookup failed for {domain}: {exc}") from exc
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _format_tls_result(domain: str, tls: dict[str, Any]) -> str:
+    subject = str(tls.get("subject") or domain)
+    issuer = str(tls.get("issuer") or "unknown issuer")
+    not_after = str(tls.get("not_after") or "unknown expiry")
+    return f"TLS {domain}: subject={subject}; issuer={issuer}; not_after={not_after}"
+
+
+def _certificate_name(value: Any) -> str:
+    parts: list[str] = []
+    if isinstance(value, tuple):
+        for item in value:
+            if isinstance(item, tuple):
+                for pair in item:
+                    if isinstance(pair, tuple) and len(pair) == 2:
+                        key, pair_value = pair
+                        if key in {"commonName", "organizationName"}:
+                            parts.append(str(pair_value))
+    return ", ".join(parts)
+
+
+def _extract_title(html: str) -> str:
+    match = TITLE_RE.search(html)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()[:160]
+
+
+def _selected_headers(headers: dict[str, str]) -> dict[str, str]:
+    selected = {}
+    for key, value in headers.items():
+        normalized = key.lower()
+        if normalized in {"server", "content-type", "location", "strict-transport-security", "x-frame-options"}:
+            selected[normalized] = value
+    return selected
+
+
+def _header_value(headers: dict[str, str], name: str) -> str:
+    for key, value in headers.items():
+        if key.lower() == name.lower():
+            return value
+    return ""
+
+
+def _txt_enrichment_results(domain: str, value: str) -> list[AdapterResult]:
+    results: list[AdapterResult] = []
+    lowered = value.lower()
+    if lowered.startswith("v=spf1"):
+        results.append(
+            AdapterResult(
+                source="dns_domain",
+                target=domain,
+                url=f"SPF {domain}: {_spf_summary(value)}",
+                platform="mail_security",
+                confidence="medium",
+                raw_reference=f"SPF {domain} -> {value}",
+            )
+        )
+    for provider, markers in PROVIDER_HINTS.items():
+        if any(marker in lowered for marker in markers):
+            results.append(
+                AdapterResult(
+                    source="dns_domain",
+                    target=domain,
+                    url=f"{provider.title()} provider hint: {value}",
+                    platform="provider_hint",
+                    confidence="low",
+                    raw_reference=f"Provider hint {provider}: {value}",
+                )
+            )
+    return results
+
+
+def _spf_summary(value: str) -> str:
+    mechanisms = value.split()
+    includes = [item.removeprefix("include:") for item in mechanisms if item.startswith("include:")]
+    policy = next((item for item in reversed(mechanisms) if item in {"-all", "~all", "?all", "+all"}), "")
+    parts = []
+    if includes:
+        parts.append(f"includes={', '.join(includes)}")
+    if policy:
+        parts.append(f"policy={policy}")
+    return "; ".join(parts) or value
 
 
 def _load_json(raw_output: str) -> Any:
@@ -463,7 +833,18 @@ def _dns_entity_type(record_type: str) -> str:
         return "mx"
     if normalized == "txt":
         return "txt_record"
+    if normalized == "mail_security":
+        return "mail_security"
+    if normalized == "provider_hint":
+        return "provider"
     return "note"
+
+
+def _web_entity_type(platform: str) -> str:
+    normalized = platform.strip().lower()
+    if normalized in {"web_endpoint", "http_redirect", "tls_certificate"}:
+        return normalized
+    return "url"
 
 
 def _normalize_dns_value(record_type: str, value: str) -> str:

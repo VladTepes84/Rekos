@@ -11,7 +11,16 @@ from .paths import case_path, database_path, validate_case_name
 from .storage import CaseStore
 
 
-REQUIRED_TABLES = {"cases", "evidence", "timeline_events"}
+REQUIRED_TABLES = {
+    "cases",
+    "evidence",
+    "timeline_events",
+    "entities",
+    "relationships",
+    "adapter_results",
+    "normalized_findings",
+    "source_runs",
+}
 
 
 @dataclass(frozen=True)
@@ -52,11 +61,16 @@ def validate_case(case: str, store: CaseStore, persist: bool = True) -> Validati
                 warnings.append(f"Required table missing: {table}")
 
             if "cases" in tables:
-                row = connection.execute(
-                    "SELECT uuid FROM cases LIMIT 1"
-                ).fetchone()
-                if row is None or not str(row["uuid"] or "").strip():
-                    warnings.append("Case UUID missing")
+                case_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(cases)").fetchall()
+                }
+                if "uuid" in case_columns:
+                    row = connection.execute(
+                        "SELECT uuid FROM cases LIMIT 1"
+                    ).fetchone()
+                    if row is None or not str(row["uuid"] or "").strip():
+                        warnings.append("Case UUID missing")
 
             if "evidence" in tables:
                 _validate_evidence_files(connection, warnings)
@@ -96,6 +110,6 @@ def _finish(
     persist: bool,
 ) -> ValidationResult:
     status = "ok" if not warnings else "warning"
-    if persist:
+    if persist and hasattr(store, "record_validation_summary"):
         store.record_validation_summary(case, status, warnings)
     return ValidationResult(case=case, status=status, warnings=warnings)
