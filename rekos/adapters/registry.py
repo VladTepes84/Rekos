@@ -10,7 +10,13 @@ from .base import BaseSourceAdapter
 from .http_snapshot import HttpSnapshotAdapter
 from .maigret import MaigretAdapter
 from .sherlock import SherlockUsernameAdapter
-from .web_osint import CrtshDomainAdapter, DnsDomainAdapter, RdapDomainAdapter, WaybackUrlAdapter
+from .web_osint import (
+    CrtshDomainAdapter,
+    DnsDomainAdapter,
+    RdapDomainAdapter,
+    WaybackUrlAdapter,
+    WebDomainAdapter,
+)
 from .wmn import WmnUsernameAdapter
 
 
@@ -59,6 +65,7 @@ def default_registry() -> SourceAdapterRegistry:
             MaigretAdapter(),
             RdapDomainAdapter(),
             SherlockUsernameAdapter(),
+            WebDomainAdapter(),
             WaybackUrlAdapter(),
             WmnUsernameAdapter(),
         ]

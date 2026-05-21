@@ -92,6 +92,8 @@ Users run only `rekos`. Sherlock and Maigret are optional integrations that REKO
 
 During `rekos investigate username <case> <username>`, REKOS generates safe username variants, runs available passive username sources, stores raw source output, normalizes discovered profile URLs into findings, updates the entity graph, records timeline events, and computes correlation-quality scores. Results are correlation indicators, not proof of identity ownership.
 
+During `rekos investigate domain <case> <domain>`, REKOS runs passive RDAP, DNS, HTTP/HTTPS, and TLS checks. It records registration evidence, DNS records, web endpoint metadata, redirects, TLS certificate summaries, SPF/mail-security summaries, and provider hints from TXT records when present.
+
 ## How REKOS Works
 
 - Target input: user-provided usernames, domains, URLs, files, notes, and indicators are stored in a local case.
@@ -109,7 +111,9 @@ During `rekos investigate username <case> <username>`, REKOS generates safe user
 | `maigret_username`  | `username`      | optional `maigret` package/tool  | Runs Maigret when installed; REKOS continues without it.                        |
 | `wmn_username`      | `username`      | none                             | Checks local public profile URL templates with conservative passive HTTP validation. |
 | `http_snapshot`     | `url`           | none                             | Captures public HTTP response artifacts and optional Playwright screenshot.      |
-| `rdap_domain`       | `domain`        | none                             | Uses public HTTPS RDAP lookup and stores raw JSON output.                        |
+| `rdap_domain`       | `domain`        | none                             | Uses public HTTPS RDAP lookup with registry fallback where available.            |
+| `dns_domain`        | `domain`        | none                             | Fetches public DNS A/AAAA/MX/NS/TXT records and extracts SPF/provider hints.     |
+| `web_domain`        | `domain`        | none                             | Performs passive HTTP/HTTPS endpoint and TLS certificate metadata checks.         |
 | `crtsh_domain`      | `domain`        | none                             | Queries the public crt.sh certificate transparency endpoint.                     |
 | `wayback_url`       | `url`, `domain` | none                             | Queries public Wayback CDX data and records archive URLs.                        |
 

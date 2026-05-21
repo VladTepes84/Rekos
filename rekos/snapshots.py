@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urldefrag, urlparse
 from urllib.request import Request, urlopen
 
 from .osint import _safe_name
+from .public_targets import normalize_public_http_url
 from .storage import CaseStore
 
 
@@ -112,18 +112,7 @@ def snapshot_investigation(case: str, store: CaseStore) -> SnapshotInvestigation
 
 
 def normalize_public_url(url: str) -> str:
-    cleaned = url.strip()
-    if not cleaned:
-        raise ValueError("URL cannot be empty.")
-    cleaned, _fragment = urldefrag(cleaned)
-    parsed = urlparse(cleaned)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("Snapshot URL scheme must be http or https.")
-    if not parsed.hostname:
-        raise ValueError("Snapshot URL must include a host.")
-    if parsed.username or parsed.password:
-        raise ValueError("Snapshot URL must not include credentials.")
-    return cleaned
+    return normalize_public_http_url(url)
 
 
 def fetch_public_url(url: str) -> HttpCapture:

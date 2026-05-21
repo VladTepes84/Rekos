@@ -709,6 +709,7 @@ def _print_graph_summary(summary) -> None:
     console.print("Graph overview")
     console.print(f"Entities: {summary.total_entities}")
     console.print(f"Relationships: {summary.total_relationships}")
+    console.print("Scope: targets, sources, DNS, web, TLS, providers, evidence links.")
 
     type_table = Table(title="Entity types", show_header=True)
     type_table.add_column("Type")

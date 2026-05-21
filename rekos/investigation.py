@@ -191,7 +191,7 @@ def investigate_domain(case: str, domain: str, store: CaseStore) -> MultiSourceI
         case=case,
         target_type="domain",
         target=normalized_domain,
-        sources=("rdap_domain", "dns_domain"),
+        sources=("rdap_domain", "dns_domain", "web_domain", "crtsh_domain"),
         entity_type="domain",
         store=store,
     )
@@ -305,6 +305,7 @@ def _investigate_sources(
         except RekosError as exc:
             skipped_count += 1
             failures.append(SourceInvestigationFailure(source=source_name, error=str(exc)))
+            store.add_source_run(case, source_name, target, "skipped", 0, str(exc))
             store.add_timeline_event(case, "source.skipped", f"Skipped source {source_name}: {exc}")
             continue
 
@@ -313,6 +314,7 @@ def _investigate_sources(
             skipped_count += 1
             message = f"Missing dependencies: {', '.join(missing)}"
             failures.append(SourceInvestigationFailure(source=adapter.name, error=message))
+            store.add_source_run(case, adapter.name, target, "skipped", 0, message)
             store.add_timeline_event(case, "source.skipped", f"Skipped source {adapter.name}: {message}")
             continue
 
@@ -320,10 +322,12 @@ def _investigate_sources(
             result = adapter.execute(case, target, store)
         except (OSError, RekosError, ValueError) as exc:
             failures.append(SourceInvestigationFailure(source=adapter.name, error=str(exc)))
+            store.add_source_run(case, adapter.name, target, "failed", 0, str(exc))
             store.add_timeline_event(case, "source.failed", f"Source {adapter.name} failed: {exc}")
             continue
         sources_run += 1
         result_count += len(result.results)
+        store.add_source_run(case, adapter.name, target, "ok", len(result.results))
 
     failed_count = len(failures) - skipped_count
     store.add_source_investigation(
