@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 from urllib.parse import urlparse, urlunparse
@@ -38,6 +39,16 @@ from .usernames import username_variants
 console = Console(width=240)
 banner_console = Console(width=120)
 error_console = Console(stderr=True, width=240)
+
+
+@dataclass(frozen=True)
+class _ProfileDisplayRow:
+    platform: str
+    url: str
+    variant: str
+    sources: str
+    confidence: str
+    reason: str
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -420,11 +431,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not findings:
                 console.print("No findings recorded")
                 return 0
+            investigations = store.investigations(args.case)
             source_investigations = store.source_investigations(args.case)
             if args.verbose:
                 _print_findings_verbose(
                     args.case,
                     findings,
+                    investigations=investigations,
                     targets=_investigation_targets(source_investigations),
                     warnings=_source_warnings(source_investigations),
                     show_uuids=args.show_uuids,
@@ -433,6 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_findings_summary(
                     args.case,
                     findings,
+                    investigations=investigations,
                     targets=_investigation_targets(source_investigations),
                     warnings=_source_warnings(source_investigations),
                 )
@@ -554,6 +568,10 @@ def console_main() -> None:
 
 
 def _username_failure_warning(failure: SourceInvestigationFailure, username: str) -> str:
+    if failure.error.startswith("Missing dependencies for "):
+        prefix, _, detail = failure.error.partition(":")
+        cleaned_detail = detail.strip().removeprefix("Missing username investigation tool: ").strip()
+        return f"{prefix}: {cleaned_detail}"
     if failure.source == "maigret_username" and not failure.error.startswith("Missing dependencies"):
         return f"Maigret source failed for {username}; continuing with other sources."
     return failure.error
@@ -563,7 +581,26 @@ def _print_username_investigation_summary(case: str, result) -> None:
     console.print(f"[green]Completed username investigation[/green] {result.username}")
     console.print(f"Variants: {len(result.variants)}")
     console.print(f"Discovered profiles: {len(result.profiles)}")
+    if result.profiles:
+        console.print()
+        console.print("Discovered profiles:")
+        for profile in _sorted_profiles(result.profiles)[:10]:
+            console.print(
+                f"- {_profile_platform_label(profile.profile_url, profile.platform):<12} "
+                f"{profile.profile_url} "
+                f"[{profile.confidence}, {profile.source}, variant={profile.source_username}]",
+                markup=False,
+            )
+        if len(result.profiles) > 10:
+            console.print(f"- ... and {len(result.profiles) - 10} more profiles")
+
+    console.print()
+    console.print("Sources:")
+    for line in _username_source_status_lines(result):
+        console.print(f"- {line}", markup=False)
+
     if result.failures:
+        console.print()
         console.print("Warnings:")
         for failure in result.failures:
             console.print(f"- {_username_failure_warning(failure, result.username)}")
@@ -613,20 +650,67 @@ def _print_domain_investigation_summary(case: str, result, store: CaseStore) -> 
     console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
-def _print_findings_summary(case: str, findings, *, targets=(), warnings=()) -> None:
+def _sorted_profiles(profiles) -> list:
+    return sorted(
+        profiles,
+        key=lambda profile: (
+            _profile_platform_label(profile.profile_url, profile.platform),
+            profile.profile_url,
+            profile.source,
+            profile.source_username,
+        ),
+    )
+
+
+def _username_source_status_lines(result) -> list[str]:
+    profile_counts: dict[str, int] = {}
+    for profile in result.profiles:
+        profile_counts[profile.source] = profile_counts.get(profile.source, 0) + 1
+    failure_by_source = {failure.source: failure for failure in result.failures}
+    sources = sorted(set(profile_counts) | set(failure_by_source))
+    lines: list[str] = []
+    for source in sources:
+        if source in profile_counts:
+            label = _username_source_label(source)
+            count = profile_counts[source]
+            suffix = "profile" if count == 1 else "profiles"
+            lines.append(f"{label}: ok ({count} {suffix})")
+        else:
+            warning = _username_failure_warning(failure_by_source[source], result.username)
+            status = "missing dependency" if "Missing dependencies" in warning else "warning"
+            lines.append(f"{source}: {status}")
+    return lines
+
+
+def _username_source_label(source: str) -> str:
+    if source == "wmn_username":
+        return "local/web username checks"
+    return source
+
+
+def _print_findings_summary(case: str, findings, *, investigations=(), targets=(), warnings=()) -> None:
     summary_findings, extra_txt_count = _summary_findings(findings)
     console.print(f"Case summary: {case}")
     console.print(f"Findings: {len(findings)}")
     _print_targets(targets)
+    _print_username_findings_summary(summary_findings, investigations=investigations)
 
-    key_findings = _key_findings(summary_findings)
+    key_source_findings = summary_findings
+    if _profile_findings(summary_findings):
+        key_source_findings = [
+            finding
+            for finding in summary_findings
+            if finding.finding_type != "discovered_profile"
+        ]
+    key_findings = _key_findings(key_source_findings)
     if key_findings:
         console.print("")
         console.print("Key findings:")
         for finding in key_findings:
             console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
 
-    _print_domain_records(summary_findings, verbose=False)
+    if _has_domain_records(summary_findings):
+        _print_domain_records(summary_findings, verbose=False)
     if extra_txt_count:
         console.print("")
         console.print(
@@ -646,29 +730,51 @@ def _print_findings_summary(case: str, findings, *, targets=(), warnings=()) -> 
     console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
-def _print_findings_verbose(case: str, findings, *, targets=(), warnings=(), show_uuids: bool = False) -> None:
+def _print_findings_verbose(case: str, findings, *, investigations=(), targets=(), warnings=(), show_uuids: bool = False) -> None:
+    display_findings = _dedupe_profile_findings_for_display(findings)
     console.print(f"Case summary: {case}")
     console.print(f"Findings: {len(findings)}")
     _print_targets(targets)
+    _print_username_findings_summary(
+        display_findings,
+        investigations=investigations,
+        include_profiles=False,
+    )
     console.print("")
     console.print("Key findings:")
-    key_findings = _key_findings(findings)
+    key_source_findings = display_findings
+    if _profile_findings(display_findings):
+        key_source_findings = [
+            finding
+            for finding in display_findings
+            if finding.finding_type != "discovered_profile"
+        ]
+    key_findings = _key_findings(key_source_findings)
     if key_findings:
         for finding in key_findings:
             console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
     else:
         console.print("- None recorded")
-    console.print("")
-    console.print("Domain records")
-    _print_domain_records(findings, verbose=True)
+    if _has_domain_records(display_findings):
+        console.print("")
+        console.print("Domain records")
+        _print_domain_records(display_findings, verbose=True)
+    _print_username_profiles_table(display_findings, investigations=investigations)
     console.print("")
     console.print("Notes:")
     console.print("Provider hints are heuristic, low-confidence indicators unless corroborated.")
     _print_warnings(warnings)
     console.print("")
     console.print("Detailed findings")
+    detailed_findings = display_findings
+    if _profile_findings(display_findings):
+        detailed_findings = [
+            finding
+            for finding in display_findings
+            if finding.finding_type != "discovered_profile"
+        ]
     grouped = {category: [] for category in _finding_category_order()}
-    for finding in findings:
+    for finding in detailed_findings:
         grouped.setdefault(_finding_category(finding), []).append(finding)
 
     for category in _finding_category_order():
@@ -711,6 +817,232 @@ def _print_findings_verbose(case: str, findings, *, targets=(), warnings=(), sho
     console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
+def _print_username_findings_summary(findings, *, investigations=(), include_profiles: bool = True) -> None:
+    profile_findings = _profile_findings(findings)
+    if not profile_findings and not investigations:
+        return
+
+    console.print("")
+    console.print("Username investigations:")
+    if investigations:
+        for investigation in investigations:
+            console.print(
+                f"- {investigation.username}: {investigation.variant_count} variant(s), "
+                f"{investigation.profile_count} discovered profile(s)"
+            )
+    else:
+        console.print("- None recorded")
+
+    if include_profiles and profile_findings:
+        console.print("")
+        console.print("Discovered profiles:")
+        rows = _profile_display_rows(profile_findings, investigations=investigations)
+        for row in rows[:12]:
+            suffix = f", variant={row.variant}" if row.variant else ""
+            console.print(
+                f"- {row.platform:<12} {row.url} "
+                f"[{row.confidence}, {row.sources}{suffix}]",
+                markup=False,
+            )
+        if len(rows) > 12:
+            console.print(f"- ... and {len(rows) - 12} more profiles")
+
+
+def _print_username_profiles_table(findings, *, investigations=()) -> None:
+    profile_findings = _profile_findings(findings)
+    if not profile_findings:
+        return
+    table = Table(title="Discovered profiles", show_header=True)
+    table.add_column("Platform", no_wrap=True)
+    table.add_column("URL", overflow="fold")
+    table.add_column("Username / variant", no_wrap=True)
+    table.add_column("Sources", no_wrap=True)
+    table.add_column("Confidence", no_wrap=True)
+    table.add_column("Reason", overflow="fold")
+    for row in _profile_display_rows(profile_findings, investigations=investigations):
+        table.add_row(
+            row.platform,
+            row.url,
+            row.variant,
+            row.sources,
+            row.confidence,
+            row.reason,
+        )
+    console.print("")
+    console.print(table)
+
+
+def _profile_findings(findings) -> list:
+    return [finding for finding in findings if finding.finding_type == "discovered_profile"]
+
+
+def _profile_display_rows(findings, *, investigations=()) -> list[_ProfileDisplayRow]:
+    profile_sources = _profile_source_usernames(investigations)
+    rows: list[_ProfileDisplayRow] = []
+    for finding in sorted(
+        _dedupe_profile_findings_for_display(findings),
+        key=_profile_finding_sort_key,
+    ):
+        if finding.finding_type != "discovered_profile":
+            continue
+        rows.append(
+            _ProfileDisplayRow(
+                platform=_profile_platform_label(finding.value, ""),
+                url=finding.value,
+                variant=_profile_variant_for_finding(finding, profile_sources),
+                sources=finding.confirming_sources or finding.source,
+                confidence=finding.confidence,
+                reason=_compact_quality_reason(finding),
+            )
+        )
+    return rows
+
+
+def _dedupe_profile_findings_for_display(findings) -> list:
+    deduped = []
+    groups: dict[tuple[str, str], list] = {}
+    for finding in findings:
+        if finding.finding_type != "discovered_profile":
+            deduped.append(finding)
+            continue
+        groups.setdefault(_profile_group_key(finding), []).append(finding)
+
+    for group in groups.values():
+        representative = max(group, key=_profile_representative_score)
+        sources = _profile_group_sources(group)
+        confidence = _profile_group_confidence(group, sources)
+        quality_score = max(finding.quality_score for finding in group)
+        quality_reason = representative.quality_reason
+        if len(sources) > 1:
+            quality_reason = "duplicate confirmation across sources"
+        deduped.append(
+            replace(
+                representative,
+                source=", ".join(sources),
+                confidence=confidence,
+                confirming_sources_count=len(sources),
+                confirming_sources=", ".join(sources),
+                quality_score=quality_score,
+                quality_reason=quality_reason,
+            )
+        )
+    return deduped
+
+
+def _profile_group_key(finding) -> tuple[str, str]:
+    return (
+        _summary_value_key(finding.value),
+        _profile_platform_label(finding.value, "").lower(),
+    )
+
+
+def _profile_representative_score(finding) -> tuple[int, int, int, int]:
+    return (
+        _confidence_rank(finding.confidence),
+        finding.quality_score,
+        finding.confirming_sources_count,
+        -len(finding.value),
+    )
+
+
+def _profile_group_sources(findings) -> list[str]:
+    sources: set[str] = set()
+    for finding in findings:
+        sources.add(finding.source)
+        if finding.confirming_sources:
+            sources.update(
+                source.strip()
+                for source in finding.confirming_sources.split(",")
+                if source.strip()
+            )
+    return sorted(sources)
+
+
+def _profile_group_confidence(findings, sources: list[str]) -> str:
+    if len(sources) > 1:
+        return "high"
+    return max(
+        (finding.confidence for finding in findings),
+        key=_confidence_rank,
+        default="low",
+    )
+
+
+def _profile_finding_sort_key(finding) -> tuple:
+    return (
+        _profile_platform_label(finding.value, ""),
+        finding.value,
+        finding.source,
+        -_confidence_rank(finding.confidence),
+    )
+
+
+def _profile_source_usernames(investigations) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for investigation in investigations:
+        for profile in investigation.profiles:
+            values.setdefault(profile.profile_url.lower(), profile.source_username)
+            values.setdefault(_summary_value_key(profile.profile_url), profile.source_username)
+    return values
+
+
+def _profile_variant_for_finding(finding, profile_sources: dict[str, str]) -> str:
+    return (
+        profile_sources.get(finding.value.lower())
+        or profile_sources.get(_summary_value_key(finding.value))
+        or ""
+    )
+
+
+def _profile_platform_label(url: str, platform: str) -> str:
+    cleaned_platform = platform.strip()
+    if cleaned_platform and cleaned_platform.lower() not in {"unknown", "profiles"}:
+        return _friendly_platform_label(cleaned_platform)
+    host = urlparse(url).hostname or ""
+    normalized_host = host.lower().removeprefix("www.")
+    known_labels = {
+        "github.com": "GitHub",
+        "reddit.com": "Reddit",
+        "instagram.com": "Instagram",
+        "x.com": "X/Twitter",
+        "twitter.com": "X/Twitter",
+        "tiktok.com": "TikTok",
+        "youtube.com": "YouTube",
+        "twitch.tv": "Twitch",
+        "pinterest.com": "Pinterest",
+        "steamcommunity.com": "Steam",
+        "medium.com": "Medium",
+        "t.me": "Telegram",
+        "scratch.mit.edu": "Scratch",
+    }
+    if normalized_host in known_labels:
+        return known_labels[normalized_host]
+    parts = [part for part in normalized_host.split(".") if part]
+    if len(parts) >= 2:
+        return parts[-2].title()
+    if parts:
+        return parts[0].title()
+    return cleaned_platform or "Profile"
+
+
+def _friendly_platform_label(value: str) -> str:
+    normalized = value.strip().lower()
+    labels = {
+        "github": "GitHub",
+        "reddit": "Reddit",
+        "instagram": "Instagram",
+        "twitter": "X/Twitter",
+        "x": "X/Twitter",
+        "tiktok": "TikTok",
+        "youtube": "YouTube",
+        "twitch": "Twitch",
+        "pinterest": "Pinterest",
+        "steam": "Steam",
+        "medium": "Medium",
+    }
+    return labels.get(normalized, value.strip().title())
+
+
 def _confidence_rank(confidence: str) -> int:
     return {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
 
@@ -732,12 +1064,20 @@ def _source_warnings(source_investigations) -> list[str]:
     seen: set[str] = set()
     for investigation in source_investigations:
         for error in investigation.errors:
-            warning = f"{error.source}: {error.error}"
+            warning = _clean_source_warning(error.source, error.error)
             if warning in seen:
                 continue
             seen.add(warning)
             warnings.append(warning)
     return warnings
+
+
+def _clean_source_warning(source: str, error: str) -> str:
+    if source == "maigret_username" and error.startswith("Missing dependencies for maigret_username:"):
+        cleaned = error.removeprefix("Missing dependencies for maigret_username:").strip()
+        cleaned = cleaned.removeprefix("Missing username investigation tool:").strip()
+        return f"Missing dependencies for maigret_username: {cleaned}"
+    return f"{source}: {error}"
 
 
 def _print_targets(targets) -> None:
@@ -761,6 +1101,7 @@ def _print_warnings(warnings) -> None:
 
 
 def _key_findings(findings) -> list:
+    findings = _dedupe_profile_findings_for_display(findings)
     priority = {
         "registration_record": 0,
         "mail_security": 1,
@@ -839,6 +1180,10 @@ def _print_domain_records(findings, *, verbose: bool) -> None:
         console.print("")
         console.print("Domain records:")
         console.print("- None recorded")
+
+
+def _has_domain_records(findings) -> bool:
+    return any(_domain_record_label(finding) for finding in findings)
 
 
 def _domain_record_label(finding) -> str:

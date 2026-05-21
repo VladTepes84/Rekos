@@ -231,6 +231,11 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "REKOS READY" in output
+    assert "REKOS READED" not in output
+    assert "REKOS READ\n" not in output
+    assert "◢▰▰◣" not in output
+    assert "◤◉◥" not in output
+    assert "◥▰▰◤" not in output
     assert "pipx install rekos" in output
     assert "rekos[full]" not in output
     assert "1. " not in output
@@ -1147,6 +1152,16 @@ def test_investigate_username_with_mocked_sherlock(
     assert "Completed username investigation" in output
     assert "Variants: 4" in output
     assert "Discovered profiles: 4" in output
+    assert "Discovered profiles:" in output
+    assert "Profiles     https://profiles.example/Alice.Smith" in output
+    assert "Profiles     https://profiles.example/alice.smith" in output
+    assert "Sources:" in output
+    assert "sherlock_username: ok (4 profiles)" in output
+    assert "maigret_username: missing dependency" in output
+    assert "Warnings:" in output
+    assert "Missing dependencies for maigret_username: install maigret." in output
+    assert output.index("Discovered profiles:") < output.index("Sources:")
+    assert output.index("Sources:") < output.index("Warnings:")
     assert "Next steps:" in output
     assert "rekos findings case-investigate" in output
     assert "rekos findings case-investigate --verbose" in output
@@ -1275,6 +1290,29 @@ def test_investigate_username_with_mocked_sherlock(
     graph_output = capsys.readouterr().out
     assert "platform" in graph_output
     assert "source" in graph_output
+    assert "Relationships: 0" not in graph_output
+    assert "No graph relationships available yet" not in graph_output
+
+    assert main(["findings", "case-investigate"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "Case summary: case-investigate" in findings_output
+    assert "Targets:" in findings_output
+    assert "Username investigations:" in findings_output
+    assert "Alice.Smith: 4 variant(s), 4 discovered profile(s)" in findings_output
+    assert "Discovered profiles:" in findings_output
+    assert "Profiles     https://profiles.example/Alice.Smith" in findings_output
+    assert "sherlock_username" in findings_output
+    assert "Missing dependencies for maigret_username: install maigret." in findings_output
+
+    assert main(["findings", "case-investigate", "--verbose"]) == 0
+    verbose_output = capsys.readouterr().out
+    assert "Discovered profiles" in verbose_output
+    assert "Platform" in verbose_output
+    assert "URL" in verbose_output
+    assert "Username / variant" in verbose_output
+    assert "https://profiles.example/Alice.Smith" in verbose_output
+    assert "Alice.Smith" in verbose_output
+    assert "sherlock_username" in verbose_output
 
 
 def test_investigate_username_runs_maigret_and_deduplicates(
@@ -1393,7 +1431,18 @@ def test_investigate_username_records_missing_maigret_source(
 
     output = capsys.readouterr().out
     assert "Warnings:" in output
-    assert "Missing dependencies for maigret_username" in output
+    assert "Discovered profiles:" in output
+    assert "Profiles     https://profiles.example/alice" in output
+    assert "Sources:" in output
+    assert "sherlock_username: ok (1 profile)" in output
+    assert "maigret_username: missing dependency" in output
+    assert "Missing dependencies for maigret_username: install maigret." in output
+
+    assert main(["findings", "case-maigret-missing-investigate"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "Discovered profiles:" in findings_output
+    assert "https://profiles.example/alice" in findings_output
+    assert "Missing dependencies for maigret_username: install maigret." in findings_output
 
     with sqlite3.connect(tmp_path / "rekos_cases" / "case-maigret-missing-investigate" / "rekos.db") as connection:
         row = connection.execute(
@@ -1490,11 +1539,16 @@ def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
 
     output = capsys.readouterr().out
     assert "Discovered profiles: 1" in output
+    assert "GitHub" in output
+    assert "https://github.com/alice" in output
 
     assert main(["findings", "case-username-multisource", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
-    assert "Discovered URLs" in findings_output
-    assert "3: maigret_username, sherlock_username, wmn_username" in findings_output
+    assert "Discovered profiles" in findings_output
+    assert "Platform" in findings_output
+    assert "GitHub" in findings_output
+    assert "https://github.com/alice" in findings_output
+    assert "maigret_username, sherlock_username, wmn_username" in findings_output
 
     case_folder = tmp_path / "rekos_cases" / "case-username-multisource"
     with sqlite3.connect(case_folder / "rekos.db") as connection:
@@ -2606,6 +2660,14 @@ def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
                 raw_reference="tiktok",
             ),
             AdapterResult(
+                source="wmn_username",
+                target="alice",
+                url="https://www.tiktok.com/@alice",
+                platform="tiktok",
+                confidence="medium",
+                raw_reference="tiktok duplicate",
+            ),
+            AdapterResult(
                 source="sherlock_username",
                 target="alice",
                 url="https://www.youtube.com/@alice",
@@ -2629,13 +2691,24 @@ def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
     assert "- Steam" in summary_output
     assert "- TikTok" in summary_output
     assert "- YouTube" in summary_output
+    tiktok_lines = [
+        line for line in summary_output.splitlines() if "tiktok.com/@alice" in line
+    ]
+    assert len(tiktok_lines) == 1
+    assert "sherlock_username, wmn_username" in tiktok_lines[0]
+    assert "duplicate confirmation across sources" not in summary_output
     assert "Confirming sources" not in summary_output
 
     assert main(["findings", "case-findings-summary", "--verbose"]) == 0
     verbose_output = capsys.readouterr().out
     assert "https://www.github.com/alice" in verbose_output
-    assert "https://github.com/alice/" in verbose_output
-    assert "Confirmed by" in verbose_output
+    assert "https://github.com/alice/" not in verbose_output
+    verbose_tiktok_lines = [
+        line for line in verbose_output.splitlines() if "tiktok.com/@alice" in line
+    ]
+    assert len(verbose_tiktok_lines) == 1
+    assert "sherlock_username, wmn_username" in verbose_tiktok_lines[0]
+    assert "duplicate confirmation across sources" in verbose_tiktok_lines[0]
 
 
 def test_score_calculates_quality_and_labels(
