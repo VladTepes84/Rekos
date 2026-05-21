@@ -179,6 +179,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        argv = ["quickstart"]
+
     parser = build_parser()
     args = parser.parse_args(argv)
     store = CaseStore()

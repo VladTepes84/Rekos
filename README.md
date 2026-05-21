@@ -21,6 +21,8 @@ Install with pipx:
 pipx install rekos
 ```
 
+Run `rekos` with no arguments to open the quickstart screen.
+
 Users run REKOS commands such as `rekos investigate username <case> <username>` and `rekos investigate domain <case> <domain>`. REKOS calls available passive sources through its source adapters and continues cleanly when optional external tools are absent.
 
 Install from a local checkout:
@@ -76,6 +78,7 @@ Normal workflow:
 Most users only need these commands:
 
 ```bash
+rekos
 rekos quickstart
 rekos new-case acme-osint
 rekos investigate username acme-osint alice.example

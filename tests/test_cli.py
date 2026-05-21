@@ -233,6 +233,18 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "Version: 1.3.0" in output
 
 
+def test_no_args_outputs_quickstart(capsys) -> None:
+    assert main([]) == 0
+    no_args_output = capsys.readouterr().out
+
+    assert main(["quickstart"]) == 0
+    quickstart_output = capsys.readouterr().out
+
+    assert no_args_output == quickstart_output
+    assert "REKOS READY" in no_args_output
+    assert "rekos new-case my_case" in no_args_output
+
+
 def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
@@ -252,11 +264,13 @@ def test_banner_renderer_falls_back_without_pyfiglet(monkeypatch) -> None:
 
 def test_help_output_has_no_banner(capsys) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        build_parser().parse_args(["--help"])
+        main(["--help"])
 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
     assert "REKOS READY" not in output
+    assert "quickstart" in output
+    assert "investigate" in output
 
 
 def test_username_variant_generation_and_deduplication() -> None:
