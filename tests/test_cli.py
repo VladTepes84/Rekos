@@ -229,8 +229,8 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "Common commands:" not in output
     assert "Investigations:" not in output
     assert "[+] Terminal-native. Passive OSINT. Local-first." in output
-    assert "REKOS 1.3.0" not in output
-    assert "Version: 1.3.0" in output
+    assert "REKOS 1.3.2" not in output
+    assert "Version: 1.3.2" in output
 
 
 def test_no_args_outputs_quickstart(capsys) -> None:
@@ -249,7 +249,7 @@ def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 1.3.0\n"
+    assert output == "rekos 1.3.2\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 
@@ -1458,7 +1458,8 @@ def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
 
     assert main(["findings", "case-username-multisource", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
-    assert "Confirming sources (3): maigret_username, sherlock_username, wmn_username" in findings_output
+    assert "Discovered URLs" in findings_output
+    assert "3: maigret_username, sherlock_username, wmn_username" in findings_output
 
     case_folder = tmp_path / "rekos_cases" / "case-username-multisource"
     with sqlite3.connect(case_folder / "rekos.db") as connection:
@@ -2074,11 +2075,19 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
         ).fetchone()
         finding_rows = connection.execute(
             """
-            SELECT type, value, source, confidence
+            SELECT finding_id, type, value, source, confidence
             FROM normalized_findings
             ORDER BY source, value
             """
         ).fetchall()
+        dns_finding_id = connection.execute(
+            """
+            SELECT finding_id
+            FROM normalized_findings
+            WHERE type = 'dns_record'
+              AND value = 'A example.com -> 93.184.216.34'
+            """
+        ).fetchone()[0]
 
     assert entity_counts["domain"] == 1
     assert entity_counts["ip"] == 2
@@ -2092,19 +2101,19 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert entity_counts["http_redirect"] == 1
     assert entity_counts["tls_certificate"] == 1
     assert source_summary == ("domain", "example.com", 4, 20, 0, 0)
-    assert ("registration_record", "example.com", "rdap_domain", "high") in finding_rows
-    assert ("dns_record", "A example.com -> 93.184.216.34", "dns_domain", "high") in finding_rows
+    assert any(row[1:] == ("registration_record", "example.com", "rdap_domain", "high") for row in finding_rows)
+    assert any(row[1:] == ("dns_record", "A example.com -> 93.184.216.34", "dns_domain", "high") for row in finding_rows)
     assert (
         "dns_record",
         "TXT example.com -> v=spf1 include:spf.protection.outlook.com -all",
         "dns_domain",
         "medium",
-    ) in finding_rows
-    assert any(row[0] == "mail_security" and row[2] == "dns_domain" for row in finding_rows)
-    assert any(row[0] == "provider_hint" and "Microsoft 365" in row[1] for row in finding_rows)
-    assert any(row[0] == "web_endpoint" and "Example Domain" in row[1] for row in finding_rows)
-    assert any(row[0] == "http_redirect" and "http://example.com -> https://example.com" in row[1] for row in finding_rows)
-    assert any(row[0] == "tls_certificate" and "Example CA" in row[1] for row in finding_rows)
+    ) in [row[1:] for row in finding_rows]
+    assert any(row[1] == "mail_security" and row[3] == "dns_domain" for row in finding_rows)
+    assert any(row[1] == "provider_hint" and "Microsoft 365" in row[2] for row in finding_rows)
+    assert any(row[1] == "web_endpoint" and "Example Domain" in row[2] for row in finding_rows)
+    assert any(row[1] == "http_redirect" and "http://example.com -> https://example.com" in row[2] for row in finding_rows)
+    assert any(row[1] == "tls_certificate" and "Example CA" in row[2] for row in finding_rows)
 
     assert main(["graph-summary", "case-domain-foundation"]) == 0
     graph_output = capsys.readouterr().out
@@ -2140,14 +2149,31 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
 
     assert main(["findings", "case-domain-foundation", "--verbose"]) == 0
     verbose_output = capsys.readouterr().out
-    assert "dns_record: A example.com -> 93.184.216.34" in verbose_output
-    assert "dns_record: TXT example.com -> txt-six" in verbose_output
-    assert "mail_security: SPF example.com" in verbose_output
-    assert "provider_hint: Microsoft 365 provider hint" in verbose_output
-    assert "web_endpoint: https://example.com -> https://example.com" in verbose_output
-    assert "tls_certificate: TLS example.com" in verbose_output
-    assert "discovered_url: https://rdap.verisign.com/com/v1/domain/example.com" in verbose_output
-    assert "from dns_domain" in verbose_output
+    assert "Findings detail" in verbose_output
+    assert "Registration" in verbose_output
+    assert "DNS" in verbose_output
+    assert "Mail security" in verbose_output
+    assert "Web / HTTP" in verbose_output
+    assert "TLS" in verbose_output
+    assert "Provider hints are heuristic, low-confidence indicators unless corroborated." in verbose_output
+    assert "Provider hints (heuristic / low confidence)" in verbose_output
+    assert "Discovered URLs" in verbose_output
+    assert "dns_record" in verbose_output
+    assert "A example.com -> 93.184.216.34" in verbose_output
+    assert "TXT example.com -> txt-six" in verbose_output
+    assert "mail_security" in verbose_output
+    assert "provider_hint" in verbose_output
+    assert "Microsoft 365 provider hint" in verbose_output
+    assert "web_endpoint" in verbose_output
+    assert "tls_certificate" in verbose_output
+    assert "https://rdap.verisign.com/com/v1/domain/example.com" in verbose_output
+    assert "dns_domain" in verbose_output
+    assert dns_finding_id not in verbose_output
+    assert dns_finding_id[:8] in verbose_output
+
+    assert main(["findings", "case-domain-foundation", "--verbose", "--show-uuids"]) == 0
+    verbose_uuid_output = capsys.readouterr().out
+    assert dns_finding_id in verbose_uuid_output
 
 
 def test_investigate_domain_uses_rdap_it_fallback(
@@ -2333,11 +2359,15 @@ def test_sources_run_crtsh_domain_with_mocked_http(
 
     assert main(["findings", "case-crtsh-source", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
-    assert "certificate_record: www.example.com" in findings_output
-    assert "(high)" in findings_output
-    assert "discovered_domain: api.example.com" in findings_output
-    assert "(medium)" in findings_output
-    assert "from crtsh_domain" in findings_output
+    assert "TLS" in findings_output
+    assert "DNS" in findings_output
+    assert "certificate_record" in findings_output
+    assert "www.example.com" in findings_output
+    assert "high" in findings_output
+    assert "discovered_domain" in findings_output
+    assert "api.example.com" in findings_output
+    assert "medium" in findings_output
+    assert "crtsh_domain" in findings_output
 
 
 def test_sources_run_wayback_url_with_mocked_http(
@@ -2514,7 +2544,7 @@ def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
     verbose_output = capsys.readouterr().out
     assert "https://www.github.com/alice" in verbose_output
     assert "https://github.com/alice/" in verbose_output
-    assert "Confirming sources" in verbose_output
+    assert "Confirmed by" in verbose_output
 
 
 def test_score_calculates_quality_and_labels(
@@ -2605,8 +2635,9 @@ def test_score_calculates_quality_and_labels(
 
     assert main(["findings", "case-score", "--verbose"]) == 0
     findings_output = capsys.readouterr().out
-    assert "quality" in findings_output
-    assert "Reason:" in findings_output
+    assert "Quality" in findings_output
+    assert "Reason" in findings_output
+    assert "Reason:" not in findings_output
 
 
 def test_discovered_profile_quality_scores_username_match_strength(

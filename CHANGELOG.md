@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2
+
+- Improved verbose findings output with analyst-readable category grouping, compact reasons, short IDs by default, and optional full UUID display.
+- Clarified Python version requirements and recommended pipx installation with Python 3.12.
+
 ## 1.3.0
 
 - Added stronger domain investigation enrichment with DNS, RDAP/WHOIS fallback, passive web/TLS checks, provider hints, and crt.sh certificate transparency.

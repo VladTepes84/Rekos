@@ -15,11 +15,15 @@ A case is a local workspace for one public-source research thread. Cases are sto
 
 ## Installation
 
-Install with pipx:
+REKOS requires Python >=3.10. Python 3.12 is recommended.
+
+Install with pipx and Python 3.12:
 
 ```bash
-pipx install rekos
+pipx install rekos --python python3.12
 ```
+
+If your default Python is already >=3.10, plain `pipx install rekos` is also supported.
 
 Run `rekos` with no arguments to open the quickstart screen.
 
@@ -90,6 +94,8 @@ rekos search acme-osint example.com
 rekos graph-summary acme-osint
 rekos export-case acme-osint --output ./acme-osint.zip
 ```
+
+Use `rekos findings <case> --verbose` for grouped analyst detail. Add `--show-uuids` only when full finding IDs are needed.
 
 Users run only `rekos`. Sherlock and Maigret are optional integrations that REKOS orchestrates internally when available.
 

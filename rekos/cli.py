@@ -140,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     findings = subparsers.add_parser("findings", help="List normalized findings")
     findings.add_argument("case")
     findings.add_argument("--verbose", action="store_true", help="Show full evidence details")
+    findings.add_argument(
+        "--show-uuids",
+        action="store_true",
+        help="Show full finding UUIDs in verbose output",
+    )
 
     score = subparsers.add_parser("score", help="Score normalized findings")
     score.add_argument("case")
@@ -416,7 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 console.print("No findings recorded")
                 return 0
             if args.verbose:
-                _print_findings_verbose(findings)
+                _print_findings_verbose(findings, show_uuids=args.show_uuids)
             else:
                 _print_findings_summary(args.case, findings)
             return 0
@@ -607,23 +612,133 @@ def _print_findings_summary(case: str, findings) -> None:
     console.print(f"Run `rekos findings {case} --verbose` for full evidence details.", markup=False)
 
 
-def _print_findings_verbose(findings) -> None:
+def _print_findings_verbose(findings, *, show_uuids: bool = False) -> None:
+    console.print("Findings detail")
+    console.print("Provider hints are heuristic, low-confidence indicators unless corroborated.")
+    grouped = {category: [] for category in _finding_category_order()}
     for finding in findings:
-        console.print(
-            f"{finding.finding_id} {finding.finding_type}: {finding.value} "
-            f"({finding.confidence}) from {finding.source}; "
-            f"quality {finding.quality_score}/{quality_label(finding.quality_score)}"
-        )
-        console.print(
-            f"  Confirming sources ({finding.confirming_sources_count}): "
-            f"{finding.confirming_sources}"
-        )
-        if finding.quality_reason:
-            console.print(f"  Reason: {finding.quality_reason}")
+        grouped.setdefault(_finding_category(finding), []).append(finding)
+
+    for category in _finding_category_order():
+        group = grouped.get(category, [])
+        if not group:
+            continue
+        table = Table(title=_finding_category_title(category), show_header=True)
+        table.add_column("ID", no_wrap=True)
+        table.add_column("Type", no_wrap=True)
+        table.add_column("Value", overflow="fold")
+        table.add_column("Confidence", no_wrap=True)
+        table.add_column("Quality", no_wrap=True)
+        table.add_column("Source", no_wrap=True)
+        table.add_column("Confirmed by")
+        table.add_column("Reason", overflow="fold")
+        for finding in sorted(
+            group,
+            key=lambda item: (
+                -_confidence_rank(item.confidence),
+                -item.quality_score,
+                item.source,
+                item.value,
+            ),
+        ):
+            table.add_row(
+                finding.finding_id if show_uuids else _short_id(finding.finding_id),
+                finding.finding_type,
+                _compact_finding_value(finding),
+                finding.confidence,
+                f"{finding.quality_score} {quality_label(finding.quality_score)}",
+                finding.source,
+                _compact_confirming_sources(finding),
+                _compact_quality_reason(finding),
+            )
+        console.print(table)
 
 
 def _confidence_rank(confidence: str) -> int:
     return {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+
+
+def _finding_category_order() -> list[str]:
+    return [
+        "registration",
+        "dns",
+        "mail_security",
+        "web_http",
+        "tls",
+        "provider_hints",
+        "discovered_urls",
+        "other",
+    ]
+
+
+def _finding_category(finding) -> str:
+    finding_type = finding.finding_type
+    if finding_type == "registration_record":
+        return "registration"
+    if finding_type in {"dns_record", "discovered_domain"}:
+        return "dns"
+    if finding_type == "mail_security":
+        return "mail_security"
+    if finding_type in {"web_endpoint", "http_redirect"}:
+        return "web_http"
+    if finding_type in {"tls_certificate", "certificate_record"}:
+        return "tls"
+    if finding_type == "provider_hint":
+        return "provider_hints"
+    if finding_type in {"discovered_url", "discovered_profile", "archive_record"}:
+        return "discovered_urls"
+    return "other"
+
+
+def _finding_category_title(category: str) -> str:
+    return {
+        "registration": "Registration",
+        "dns": "DNS",
+        "mail_security": "Mail security",
+        "web_http": "Web / HTTP",
+        "tls": "TLS",
+        "provider_hints": "Provider hints (heuristic / low confidence)",
+        "discovered_urls": "Discovered URLs",
+        "other": "Other",
+    }[category]
+
+
+def _short_id(value: str) -> str:
+    return value[:8] if len(value) > 8 else value
+
+
+def _compact_finding_value(finding) -> str:
+    value = " ".join(finding.value.strip().split())
+    if finding.finding_type == "provider_hint":
+        value = f"[heuristic] {value}"
+    return _truncate_text(value, 140)
+
+
+def _compact_confirming_sources(finding) -> str:
+    if finding.confirming_sources_count <= 1:
+        return finding.source
+    return _truncate_text(f"{finding.confirming_sources_count}: {finding.confirming_sources}", 90)
+
+
+def _compact_quality_reason(finding) -> str:
+    if not finding.quality_reason:
+        return "not scored"
+    parts = [
+        part.strip()
+        for part in finding.quality_reason.split(";")
+        if part.strip()
+        and "does not claim identity ownership" not in part
+        and not part.strip().endswith("quality label")
+    ]
+    if finding.finding_type == "provider_hint":
+        parts.insert(0, "heuristic indicator")
+    return _truncate_text("; ".join(parts[:3]) if parts else "scored locally", 120)
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 3]}..."
 
 
 def _dedupe_summary_findings(findings):
