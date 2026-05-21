@@ -229,15 +229,15 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "Common commands:" not in output
     assert "Investigations:" not in output
     assert "[+] Terminal-native. Passive OSINT. Local-first." in output
-    assert "REKOS 1.2.0" not in output
-    assert "Version: 1.2.0" in output
+    assert "REKOS 1.3.0" not in output
+    assert "Version: 1.3.0" in output
 
 
 def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 1.2.0\n"
+    assert output == "rekos 1.3.0\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 
@@ -879,9 +879,9 @@ def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> N
 
     output = capsys.readouterr().out
     assert "## Entities" in output
-    assert "`email`: a@example.com" in output
+    assert "| `email` | a@example.com |" in output
     assert "## Relationships" in output
-    assert "`possible_match` (medium)" in output
+    assert "| `possible_match` | medium |" in output
     assert "## Graph Summary" in output
     assert "Total entities: 2" in output
 
@@ -900,9 +900,9 @@ def test_report_renders_username_variants_and_correlations(
     output = capsys.readouterr().out
     assert "Alice.Smith_test" in output
     assert "alice.smith_test" in output
-    assert "`possible_match` (high)" in output
-    assert "`possible_match` (medium)" in output
-    assert "`possible_match` (low)" in output
+    assert "| `possible_match` | high |" in output
+    assert "| `possible_match` | medium |" in output
+    assert "| `possible_match` | low |" in output
     assert "username variant correlation" in output
 
 
@@ -3080,13 +3080,13 @@ def test_report_renders_findings_section(
 
     output = capsys.readouterr().out
     assert "## Findings" in output
-    assert "`archive_record`:" in output
+    assert "| `archive_record` |" in output
     assert "https://web.archive.org/web/20200101000000" in output
     assert "https://example.com/page" in output
-    assert "Confidence: medium" in output
-    assert "Quality:" in output
-    assert "Quality reason:" in output
-    assert "Source: wayback_url" in output
+    assert "| Type | Value | Confidence | Quality | Source | ID |" in output
+    assert "| medium |" in output
+    assert "wayback_url" in output
+    assert "Full finding UUIDs, raw references, and scoring reasons remain available" in output
 
 
 def test_metadata_returns_clear_error_when_tools_are_missing(

@@ -80,33 +80,40 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
 
     lines.extend(["", "## Entities"])
     if snapshot.entities:
+        lines.extend(["| Type | Value | ID | Note |", "| --- | --- | --- | --- |"])
         for entity in snapshot.entities:
-            lines.extend(
-                [
-                    f"- `{entity.entity_type}`: {entity.value}",
-                    f"  - UUID: `{entity.entity_id}`",
-                    f"  - Added: {entity.created_at}",
-                ]
+            lines.append(
+                "| "
+                f"`{_escape_table(entity.entity_type)}` | "
+                f"{_escape_table(entity.value)} | "
+                f"`{_short_id(entity.entity_id)}` | "
+                f"{_escape_table(entity.note or '')} |"
             )
-            if entity.note:
-                lines.append(f"  - Note: {entity.note}")
     else:
         lines.append("- None recorded")
 
     lines.extend(["", "## Relationships"])
     if snapshot.relationships:
+        entity_labels = {
+            entity.entity_id: f"{entity.entity_type}:{_short_value(entity.value)}"
+            for entity in snapshot.entities
+        }
+        lines.extend(
+            [
+                "| Type | Confidence | From | To | ID | Note |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
         for relationship in snapshot.relationships:
-            lines.extend(
-                [
-                    f"- `{relationship.relationship_type}` ({relationship.confidence})",
-                    f"  - UUID: `{relationship.relationship_id}`",
-                    f"  - From: `{relationship.source_entity_id}`",
-                    f"  - To: `{relationship.target_entity_id}`",
-                    f"  - Added: {relationship.created_at}",
-                ]
+            lines.append(
+                "| "
+                f"`{_escape_table(relationship.relationship_type)}` | "
+                f"{_escape_table(relationship.confidence)} | "
+                f"{_escape_table(entity_labels.get(relationship.source_entity_id, _short_id(relationship.source_entity_id)))} | "
+                f"{_escape_table(entity_labels.get(relationship.target_entity_id, _short_id(relationship.target_entity_id)))} | "
+                f"`{_short_id(relationship.relationship_id)}` | "
+                f"{_escape_table(relationship.note or '')} |"
             )
-            if relationship.note:
-                lines.append(f"  - Note: {relationship.note}")
     else:
         lines.append("- None recorded")
 
@@ -125,28 +132,38 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
         lines.append("  - None recorded")
     lines.append("- Most connected entities:")
     if snapshot.graph_summary.most_connected:
+        lines.extend(["", "| Type | Value | Graph links | ID |", "| --- | --- | --- | --- |"])
         for entity in snapshot.graph_summary.most_connected:
             lines.append(
-                f"  - `{entity.entity_id}` {entity.entity_type}: "
-                f"{entity.value} ({entity.connection_count})"
+                "| "
+                f"`{_escape_table(entity.entity_type)}` | "
+                f"{_escape_table(_short_value(entity.value, limit=120))} | "
+                f"{entity.connection_count} | "
+                f"`{_short_id(entity.entity_id)}` |"
             )
     else:
         lines.append("  - None recorded")
 
     lines.extend(["", "## Findings"])
     if snapshot.findings:
+        lines.extend(
+            [
+                "| Type | Value | Confidence | Quality | Source | ID |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
         for finding in snapshot.findings:
-            lines.extend(
-                [
-                    f"- `{finding.finding_type}`: {finding.value}",
-                    f"  - Confidence: {finding.confidence}",
-                    f"  - Quality: {finding.quality_score} ({quality_label(finding.quality_score)})",
-                    f"  - Quality reason: {finding.quality_reason or 'Not scored yet'}",
-                    f"  - Source: {finding.source}",
-                    f"  - UUID: `{finding.finding_id}`",
-                    f"  - Added: {finding.created_at}",
-                ]
+            lines.append(
+                "| "
+                f"`{_escape_table(finding.finding_type)}` | "
+                f"{_escape_table(_short_value(finding.value, limit=120))} | "
+                f"{_escape_table(finding.confidence)} | "
+                f"{finding.quality_score} ({quality_label(finding.quality_score)}) | "
+                f"{_escape_table(finding.source)} | "
+                f"`{_short_id(finding.finding_id)}` |"
             )
+        lines.append("")
+        lines.append("Full finding UUIDs, raw references, and scoring reasons remain available in the case database and exports.")
     else:
         lines.append("- None recorded")
 
@@ -198,3 +215,19 @@ def render_markdown(snapshot: CaseSnapshot) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _short_id(value: str) -> str:
+    cleaned = value.strip()
+    return cleaned[:8] if len(cleaned) > 8 else cleaned
+
+
+def _short_value(value: str, *, limit: int = 80) -> str:
+    cleaned = " ".join(value.strip().split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: limit - 1]}..."
+
+
+def _escape_table(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")

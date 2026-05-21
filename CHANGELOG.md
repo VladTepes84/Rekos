@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0
+
+- Added stronger domain investigation enrichment with DNS, RDAP/WHOIS fallback, passive web/TLS checks, provider hints, and crt.sh certificate transparency.
+- Added public-target safety validation for URL/domain workflows to reject local, private, reserved, multicast, link-local, and metadata-service targets.
+- Improved source-run tracking so `list-sources` shows each source run with per-run counts.
+- Made reports more readable by compacting entity, relationship, and finding sections.
+
 ## 1.2.0
 
 - Added domain investigation v1 with passive RDAP and DNS record collection.
