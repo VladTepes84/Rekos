@@ -65,6 +65,7 @@ Users always run `rekos`, not Sherlock or Maigret directly. `rekos investigate u
 rekos new-case social_test
 rekos investigate username social_test username
 rekos findings social_test
+rekos findings social_test --verbose
 rekos score social_test
 rekos graph-summary social_test
 rekos export-case social_test --output social_test.zip
@@ -89,6 +90,7 @@ rekos investigate username acme-osint alice.example
 rekos investigate domain acme-osint example.com
 rekos snapshot-url acme-osint https://example.com/profile/alice
 rekos findings acme-osint
+rekos findings acme-osint --verbose
 rekos score acme-osint
 rekos search acme-osint example.com
 rekos graph-summary acme-osint

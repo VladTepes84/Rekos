@@ -154,6 +154,7 @@ def _quickstart_table() -> Text:
         ("  rekos investigate domain my_case example.com\n\n", "bright_green"),
         ("REVIEW\n", "bold bright_cyan"),
         ("  rekos findings my_case\n", "bright_green"),
+        ("  rekos findings my_case --verbose\n", "bright_green"),
         ("  rekos score my_case\n", "bright_green"),
         ("  rekos graph-summary my_case\n\n", "bright_green"),
         ("EXPORT\n", "bold magenta"),

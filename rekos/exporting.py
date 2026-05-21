@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
 
 from .paths import case_path, validate_case_name
+from .reporting import render_report
 from .storage import CaseStore
 
 
@@ -18,6 +20,13 @@ def export_case(case: str, output_path: Path, store: CaseStore) -> Path:
     root = case_path(case_name, store.cases_root)
     if not root.is_dir():
         raise FileNotFoundError(f"Case not found: {case_name}")
+
+    reports_folder = root / "reports"
+    reports_folder.mkdir(exist_ok=True)
+    _write_text_atomic(
+        reports_folder / "case-report.md",
+        render_report(store.snapshot(case_name), "md"),
+    )
 
     output = output_path.expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +64,16 @@ def export_case(case: str, output_path: Path, store: CaseStore) -> Path:
         temp_path.unlink(missing_ok=True)
         raise
     return output
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(text, encoding="utf-8")
+        temp_path.replace(path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _sha256(path: Path) -> str:

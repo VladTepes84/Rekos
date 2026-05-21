@@ -358,7 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "investigate" and args.investigation_type == "domain":
             result = investigate_domain(args.case, args.domain, store)
-            _print_domain_investigation_summary(args.case, result)
+            _print_domain_investigation_summary(args.case, result, store)
             return 0
 
         if args.command == "investigate" and args.investigation_type == "url":
@@ -420,10 +420,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not findings:
                 console.print("No findings recorded")
                 return 0
+            source_investigations = store.source_investigations(args.case)
             if args.verbose:
-                _print_findings_verbose(findings, show_uuids=args.show_uuids)
+                _print_findings_verbose(
+                    args.case,
+                    findings,
+                    targets=_investigation_targets(source_investigations),
+                    warnings=_source_warnings(source_investigations),
+                    show_uuids=args.show_uuids,
+                )
             else:
-                _print_findings_summary(args.case, findings)
+                _print_findings_summary(
+                    args.case,
+                    findings,
+                    targets=_investigation_targets(source_investigations),
+                    warnings=_source_warnings(source_investigations),
+                )
             return 0
 
         if args.command == "score":
@@ -563,9 +575,31 @@ def _print_username_investigation_summary(case: str, result) -> None:
     console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
-def _print_domain_investigation_summary(case: str, result) -> None:
+def _print_domain_investigation_summary(case: str, result, store: CaseStore) -> None:
+    findings = store.findings(case, refresh_scores=True)
+    domain_findings = [
+        finding
+        for finding in findings
+        if finding.value.lower().find(result.target.lower()) >= 0
+        or finding.raw_reference.lower().find(result.target.lower()) >= 0
+    ]
+    breakdown = _domain_record_breakdown(domain_findings)
     console.print(f"[green]Completed domain investigation[/green] {result.target}")
     console.print(f"Records discovered: {result.results}")
+    if breakdown:
+        console.print()
+        console.print("Record breakdown:")
+        for label in ("A", "AAAA", "MX", "NS", "SPF", "DMARC", "DKIM", "TXT", "CNAME", "Certificates", "Subdomains", "Web / HTTP", "TLS"):
+            count = breakdown.get(label, 0)
+            if count:
+                console.print(f"- {label:<12} {count}")
+
+    preview = _domain_preview_findings(domain_findings)
+    if preview:
+        console.print()
+        console.print("Key findings:")
+        for finding in preview:
+            console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
     if result.failures:
         console.print()
         console.print("Warnings:")
@@ -579,27 +613,20 @@ def _print_domain_investigation_summary(case: str, result) -> None:
     console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
-def _print_findings_summary(case: str, findings) -> None:
-    console.print(f"Completed findings summary for {case}")
+def _print_findings_summary(case: str, findings, *, targets=(), warnings=()) -> None:
     summary_findings, extra_txt_count = _summary_findings(findings)
-    sorted_findings = sorted(
-        summary_findings,
-        key=lambda finding: (
-            -_confidence_rank(finding.confidence),
-            -finding.quality_score,
-            finding.source,
-            finding.value,
-        ),
-    )
-    for confidence in ("high", "medium", "low"):
-        group = [finding for finding in sorted_findings if finding.confidence == confidence]
-        if not group:
-            continue
+    console.print(f"Case summary: {case}")
+    console.print(f"Findings: {len(findings)}")
+    _print_targets(targets)
+
+    key_findings = _key_findings(summary_findings)
+    if key_findings:
         console.print("")
-        console.print(f"{confidence.title()} confidence:")
-        for finding in group:
-            label = _finding_summary_label(finding)
-            console.print(f"- {label:<12} {finding.value}", markup=False)
+        console.print("Key findings:")
+        for finding in key_findings:
+            console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
+
+    _print_domain_records(summary_findings, verbose=False)
     if extra_txt_count:
         console.print("")
         console.print(
@@ -607,14 +634,39 @@ def _print_findings_summary(case: str, findings) -> None:
             f"Run rekos findings {case} --verbose for details.",
             markup=False,
         )
+
     console.print("")
-    console.print("Details:")
-    console.print(f"Run `rekos findings {case} --verbose` for full evidence details.", markup=False)
+    console.print("Notes:")
+    console.print("- Provider hints are heuristic and low-confidence unless corroborated.")
+    _print_warnings(warnings)
+    console.print("")
+    console.print("Next steps:")
+    console.print(f"- rekos findings {case} --verbose")
+    console.print(f"- rekos graph-summary {case}")
+    console.print(f"- rekos export-case {case} --output {case}.zip")
 
 
-def _print_findings_verbose(findings, *, show_uuids: bool = False) -> None:
-    console.print("Findings detail")
+def _print_findings_verbose(case: str, findings, *, targets=(), warnings=(), show_uuids: bool = False) -> None:
+    console.print(f"Case summary: {case}")
+    console.print(f"Findings: {len(findings)}")
+    _print_targets(targets)
+    console.print("")
+    console.print("Key findings:")
+    key_findings = _key_findings(findings)
+    if key_findings:
+        for finding in key_findings:
+            console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
+    else:
+        console.print("- None recorded")
+    console.print("")
+    console.print("Domain records")
+    _print_domain_records(findings, verbose=True)
+    console.print("")
+    console.print("Notes:")
     console.print("Provider hints are heuristic, low-confidence indicators unless corroborated.")
+    _print_warnings(warnings)
+    console.print("")
+    console.print("Detailed findings")
     grouped = {category: [] for category in _finding_category_order()}
     for finding in findings:
         grouped.setdefault(_finding_category(finding), []).append(finding)
@@ -653,9 +705,188 @@ def _print_findings_verbose(findings, *, show_uuids: bool = False) -> None:
             )
         console.print(table)
 
+    console.print("")
+    console.print("Next steps:")
+    console.print(f"- rekos graph-summary {case}")
+    console.print(f"- rekos export-case {case} --output {case}.zip")
+
 
 def _confidence_rank(confidence: str) -> int:
     return {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+
+
+def _investigation_targets(source_investigations) -> list[str]:
+    seen: set[str] = set()
+    targets: list[str] = []
+    for investigation in source_investigations:
+        label = f"{investigation.target_type}: {investigation.target}"
+        if label in seen:
+            continue
+        seen.add(label)
+        targets.append(label)
+    return targets
+
+
+def _source_warnings(source_investigations) -> list[str]:
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for investigation in source_investigations:
+        for error in investigation.errors:
+            warning = f"{error.source}: {error.error}"
+            if warning in seen:
+                continue
+            seen.add(warning)
+            warnings.append(warning)
+    return warnings
+
+
+def _print_targets(targets) -> None:
+    console.print("")
+    console.print("Targets:")
+    if targets:
+        for target in targets:
+            console.print(f"- {target}")
+    else:
+        console.print("- None recorded")
+
+
+def _print_warnings(warnings) -> None:
+    console.print("")
+    console.print("Warnings:")
+    if warnings:
+        for warning in warnings:
+            console.print(f"- {warning}", markup=False)
+    else:
+        console.print("- None")
+
+
+def _key_findings(findings) -> list:
+    priority = {
+        "registration_record": 0,
+        "mail_security": 1,
+        "web_endpoint": 2,
+        "http_redirect": 3,
+        "tls_certificate": 4,
+        "certificate_record": 5,
+        "provider_hint": 6,
+        "discovered_profile": 7,
+        "discovered_url": 8,
+    }
+    selected = [
+        finding
+        for finding in findings
+        if finding.finding_type in priority
+    ]
+    return sorted(
+        selected,
+        key=lambda finding: (
+            priority[finding.finding_type],
+            -_confidence_rank(finding.confidence),
+            -finding.quality_score,
+            finding.value,
+        ),
+    )[:8]
+
+
+def _domain_preview_findings(findings) -> list:
+    return _key_findings(findings)[:6]
+
+
+def _domain_record_breakdown(findings) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for finding in findings:
+        label = _domain_record_label(finding)
+        if label:
+            counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _print_domain_records(findings, *, verbose: bool) -> None:
+    sections = [
+        ("A", "A records"),
+        ("AAAA", "AAAA records"),
+        ("MX", "MX records"),
+        ("NS", "NS records"),
+        ("SPF", "SPF"),
+        ("DMARC", "DMARC"),
+        ("DKIM", "DKIM"),
+        ("TXT", "Other TXT"),
+        ("CNAME", "CNAME records"),
+        ("Certificates", "Certificates"),
+        ("Subdomains", "Certificate subdomains"),
+        ("Web / HTTP", "Web / HTTP"),
+        ("TLS", "TLS"),
+    ]
+    printed = False
+    for label, title in sections:
+        group = [finding for finding in findings if _domain_record_label(finding) == label]
+        if not group:
+            continue
+        printed = True
+        console.print("")
+        console.print(f"{title}:")
+        for finding in sorted(group, key=lambda item: (item.source, item.value)):
+            value = _preview_value(finding.value, limit=180 if verbose else 120)
+            if verbose:
+                console.print(
+                    f"- {value} [{finding.confidence}, {finding.source}, "
+                    f"quality {finding.quality_score}/{quality_label(finding.quality_score)}]",
+                    markup=False,
+                )
+            else:
+                console.print(f"- {value}", markup=False)
+    if not printed:
+        console.print("")
+        console.print("Domain records:")
+        console.print("- None recorded")
+
+
+def _domain_record_label(finding) -> str:
+    if finding.finding_type == "dns_record":
+        record_type = _dns_record_type(finding.value)
+        if record_type == "TXT":
+            return _txt_record_label(finding.value)
+        if record_type in {"A", "AAAA", "MX", "NS", "CNAME"}:
+            return record_type
+        return record_type
+    if finding.finding_type == "mail_security":
+        value = finding.value.upper()
+        if "DMARC" in value:
+            return "DMARC"
+        if "DKIM" in value:
+            return "DKIM"
+        return "SPF"
+    if finding.finding_type == "certificate_record":
+        return "Certificates"
+    if finding.finding_type == "discovered_domain":
+        return "Subdomains"
+    if finding.finding_type in {"web_endpoint", "http_redirect"}:
+        return "Web / HTTP"
+    if finding.finding_type == "tls_certificate":
+        return "TLS"
+    return ""
+
+
+def _dns_record_type(value: str) -> str:
+    parts = value.split(maxsplit=1)
+    if not parts:
+        return ""
+    return parts[0].upper()
+
+
+def _txt_record_label(value: str) -> str:
+    normalized = value.lower()
+    if "v=spf1" in normalized:
+        return "SPF"
+    if "v=dmarc1" in normalized or "_dmarc" in normalized:
+        return "DMARC"
+    if "v=dkim1" in normalized or "._domainkey" in normalized or "dkim" in normalized:
+        return "DKIM"
+    return "TXT"
+
+
+def _preview_value(value: str, *, limit: int = 140) -> str:
+    return _truncate_text(" ".join(value.strip().split()), limit)
 
 
 def _finding_category_order() -> list[str]:
@@ -710,7 +941,7 @@ def _short_id(value: str) -> str:
 def _compact_finding_value(finding) -> str:
     value = " ".join(finding.value.strip().split())
     if finding.finding_type == "provider_hint":
-        value = f"[heuristic] {value}"
+        value = f"heuristic indicator: {value}"
     return _truncate_text(value, 140)
 
 
@@ -829,6 +1060,9 @@ def _print_graph_summary(summary) -> None:
     console.print("Graph overview")
     console.print(f"Entities: {summary.total_entities}")
     console.print(f"Relationships: {summary.total_relationships}")
+    if summary.total_relationships == 0:
+        console.print("No graph relationships available yet. Run findings --verbose to inspect collected records.")
+        return
     console.print("Scope: targets, sources, DNS, web, TLS, providers, evidence links.")
 
     type_table = Table(title="Entity types", show_header=True)

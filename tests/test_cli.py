@@ -113,6 +113,16 @@ def test_case_lifecycle_generates_markdown_report(tmp_path: Path, monkeypatch, c
 
     output = capsys.readouterr().out
     assert "# REKOS Case Report: case-001" in output
+    assert "## Case metadata" in output
+    assert "## Targets" in output
+    assert "## Executive summary" in output
+    assert "## Key findings" in output
+    assert "## Technical findings" in output
+    assert "## Domain records grouped by type" in output
+    assert "## TXT / SPF / DMARC / DKIM" in output
+    assert "## Warnings / source errors" in output
+    assert "## Evidence / local artifacts" in output
+    assert "## Generated at" in output
     assert "`username`: alice" in output
     assert "Initial triage note" in output
     assert "SHA-256" in output
@@ -142,10 +152,16 @@ def test_export_case_creates_zip_with_manifest(tmp_path: Path, monkeypatch, caps
     assert archive.exists()
     with zipfile.ZipFile(archive) as exported:
         names = set(exported.namelist())
+        report_text = exported.read("case-export/reports/case-report.md").decode("utf-8")
 
     assert "case-export/rekos.db" in names
+    assert "case-export/reports/case-report.md" in names
     assert "case-export/manifest.json" in names
     assert "case-export/manifest.sha256" in names
+    assert "# REKOS Case Report: case-export" in report_text
+    assert "## Executive summary" in report_text
+    assert "## Technical findings" in report_text
+    assert "## Warnings / source errors" in report_text
 
 
 def test_validation_module_smoke(tmp_path: Path, monkeypatch) -> None:
@@ -223,6 +239,7 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "rekos investigate username my_case username" in output
     assert "rekos investigate domain my_case example.com" in output
     assert "rekos findings my_case" in output
+    assert "rekos findings my_case --verbose" in output
     assert "rekos score my_case" in output
     assert "rekos graph-summary my_case" in output
     assert "rekos export-case my_case --output my_case.zip" in output
@@ -855,6 +872,24 @@ def test_graph_summary_counts_and_most_connected(
     assert "Graph links are internal relationships, not unique findings." in output
     assert "example.com" in output
     assert entity_ids[1] not in output
+
+
+def test_graph_summary_empty_case_is_explicit(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-empty-graph"]) == 0
+    capsys.readouterr()
+
+    assert main(["graph-summary", "case-empty-graph"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Graph overview" in output
+    assert "Entities: 0" in output
+    assert "Relationships: 0" in output
+    assert "No graph relationships available yet. Run findings --verbose to inspect collected records." in output
+    assert "Entity types" not in output
 
 
 def test_report_renders_graph_sections(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -2002,10 +2037,13 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
         "AAAA": {"Status": 0, "Answer": [{"type": 28, "data": "2606:2800:220:1:248:1893:25c8:1946"}]},
         "MX": {"Status": 0, "Answer": [{"type": 15, "data": "10 mail.example.com."}]},
         "NS": {"Status": 0, "Answer": [{"type": 2, "data": "ns1.example.com."}]},
+        "CNAME": {"Status": 0, "Answer": [{"type": 5, "data": "edge.example.net."}]},
         "TXT": {
             "Status": 0,
             "Answer": [
                 {"type": 16, "data": '"v=spf1 include:spf.protection.outlook.com -all"'},
+                {"type": 16, "data": '"v=DMARC1; p=reject; rua=mailto:dmarc@example.com"'},
+                {"type": 16, "data": '"selector1._domainkey.example.com v=DKIM1; k=rsa; p=abc123"'},
                 {"type": 16, "data": '"txt-two"'},
                 {"type": 16, "data": '"txt-three"'},
                 {"type": 16, "data": '"txt-four"'},
@@ -2038,7 +2076,7 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
                 headers={"Content-Type": "text/html; charset=utf-8", "Server": "example-server"},
             )
         if request.full_url.startswith("https://crt.sh/?"):
-            return FakeHttpResponse(200, b"[]", headers={"Content-Type": "application/json"})
+            raise TimeoutError("crt.sh timed out")
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
     monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
@@ -2058,7 +2096,24 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     output = capsys.readouterr().out
     assert "Completed domain investigation" in output
     assert "example.com" in output
-    assert "Records discovered: 20" in output
+    assert "Records discovered: 23" in output
+    assert "Record breakdown:" in output
+    assert "- A            1" in output
+    assert "- AAAA         1" in output
+    assert "- MX           1" in output
+    assert "- NS           1" in output
+    assert "- SPF          2" in output
+    assert "- DMARC        1" in output
+    assert "- DKIM         1" in output
+    assert "- TXT          6" in output
+    assert "- CNAME        1" in output
+    assert "- Web / HTTP   3" in output
+    assert "- TLS          1" in output
+    assert "Key findings:" in output
+    assert "registration_record example.com" in output
+    assert "web_endpoint" in output
+    assert "Warnings:" in output
+    assert "crtsh_domain" in output
     assert "Sources run:" not in output
     assert "rekos findings case-domain-foundation" in output
     assert "rekos graph-summary case-domain-foundation" in output
@@ -2092,20 +2147,27 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert entity_counts["domain"] == 1
     assert entity_counts["ip"] == 2
     assert entity_counts["mx"] == 1
+    assert entity_counts["cname"] == 1
     assert entity_counts["nameserver"] == 1
     assert entity_counts["source"] == 3
-    assert entity_counts["txt_record"] == 7
+    assert entity_counts["txt_record"] == 9
     assert entity_counts["mail_security"] == 1
     assert entity_counts["provider"] == 1
     assert entity_counts["web_endpoint"] == 2
     assert entity_counts["http_redirect"] == 1
     assert entity_counts["tls_certificate"] == 1
-    assert source_summary == ("domain", "example.com", 4, 20, 0, 0)
+    assert source_summary == ("domain", "example.com", 3, 23, 0, 1)
     assert any(row[1:] == ("registration_record", "example.com", "rdap_domain", "high") for row in finding_rows)
     assert any(row[1:] == ("dns_record", "A example.com -> 93.184.216.34", "dns_domain", "high") for row in finding_rows)
     assert (
         "dns_record",
         "TXT example.com -> v=spf1 include:spf.protection.outlook.com -all",
+        "dns_domain",
+        "medium",
+    ) in [row[1:] for row in finding_rows]
+    assert (
+        "dns_record",
+        "CNAME example.com -> edge.example.net",
         "dns_domain",
         "medium",
     ) in [row[1:] for row in finding_rows]
@@ -2131,25 +2193,44 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
 
     assert main(["findings", "case-domain-foundation"]) == 0
     findings_output = capsys.readouterr().out
-    assert "Completed findings summary" in findings_output
+    assert "Case summary: case-domain-foundation" in findings_output
+    assert "Targets:" in findings_output
+    assert "Key findings:" in findings_output
     assert "registration_record example.com" in findings_output
-    assert "dns_record" in findings_output
+    assert "A records:" in findings_output
     assert "A example.com -> 93.184.216.34" in findings_output
+    assert "AAAA records:" in findings_output
     assert "AAAA example.com -> 2606:2800:220:1:248:1893:25c8:1946" in findings_output
+    assert "MX records:" in findings_output
     assert "MX example.com -> mail.example.com" in findings_output
+    assert "NS records:" in findings_output
     assert "NS example.com -> ns1.example.com" in findings_output
-    assert "web_endpoint" in findings_output
-    assert "tls_certificate" in findings_output
-    assert "mail_security" in findings_output
-    assert "provider_hint" in findings_output
+    assert "SPF:" in findings_output
+    assert "DMARC:" in findings_output
+    assert "DKIM:" in findings_output
+    assert "Other TXT:" in findings_output
+    assert "CNAME records:" in findings_output
+    assert "CNAME example.com -> edge.example.net" in findings_output
+    assert "SPF example.com" in findings_output
+    assert "Microsoft 365 provider hint" in findings_output
+    assert "https://example.com -> https://example.com" in findings_output
+    assert "TLS example.com" in findings_output
+    assert findings_output.index("SPF:") < findings_output.index("DMARC:")
+    assert findings_output.index("DMARC:") < findings_output.index("DKIM:")
+    assert findings_output.index("DKIM:") < findings_output.index("Other TXT:")
     assert findings_output.count("TXT example.com ->") == 5
-    assert "... and 2 more TXT records. Run rekos findings case-domain-foundation --verbose for details." in findings_output
+    assert "... and 4 more TXT records. Run rekos findings case-domain-foundation --verbose for details." in findings_output
     assert "https://rdap.verisign.com" not in findings_output
     assert "https://icann.org" not in findings_output
+    assert "Warnings:" in findings_output
+    assert "crtsh_domain" in findings_output
 
     assert main(["findings", "case-domain-foundation", "--verbose"]) == 0
     verbose_output = capsys.readouterr().out
-    assert "Findings detail" in verbose_output
+    assert "Case summary: case-domain-foundation" in verbose_output
+    assert "Targets:" in verbose_output
+    assert "Domain records" in verbose_output
+    assert "Detailed findings" in verbose_output
     assert "Registration" in verbose_output
     assert "DNS" in verbose_output
     assert "Mail security" in verbose_output
@@ -2160,7 +2241,15 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert "Discovered URLs" in verbose_output
     assert "dns_record" in verbose_output
     assert "A example.com -> 93.184.216.34" in verbose_output
+    assert "SPF:" in verbose_output
+    assert "DMARC:" in verbose_output
+    assert "DKIM:" in verbose_output
+    assert "Other TXT:" in verbose_output
+    assert verbose_output.index("SPF:") < verbose_output.index("DMARC:")
+    assert verbose_output.index("DMARC:") < verbose_output.index("DKIM:")
+    assert verbose_output.index("DKIM:") < verbose_output.index("Other TXT:")
     assert "TXT example.com -> txt-six" in verbose_output
+    assert "CNAME example.com -> edge.example.net" in verbose_output
     assert "mail_security" in verbose_output
     assert "provider_hint" in verbose_output
     assert "Microsoft 365 provider hint" in verbose_output
@@ -2168,6 +2257,8 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert "tls_certificate" in verbose_output
     assert "https://rdap.verisign.com/com/v1/domain/example.com" in verbose_output
     assert "dns_domain" in verbose_output
+    assert "Warnings:" in verbose_output
+    assert "crtsh_domain" in verbose_output
     assert dns_finding_id not in verbose_output
     assert dns_finding_id[:8] in verbose_output
 

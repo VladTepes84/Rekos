@@ -56,6 +56,7 @@ ALLOWED_ENTITY_TYPES = {
     "source",
     "nameserver",
     "mx",
+    "cname",
     "txt_record",
     "web_endpoint",
     "http_redirect",

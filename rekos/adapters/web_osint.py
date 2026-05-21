@@ -26,6 +26,7 @@ DNS_QUERY_TYPES = {
     "MX": 15,
     "NS": 2,
     "TXT": 16,
+    "CNAME": 5,
 }
 DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -833,6 +834,8 @@ def _dns_entity_type(record_type: str) -> str:
         return "mx"
     if normalized == "txt":
         return "txt_record"
+    if normalized == "cname":
+        return "cname"
     if normalized == "mail_security":
         return "mail_security"
     if normalized == "provider_hint":
@@ -853,7 +856,7 @@ def _normalize_dns_value(record_type: str, value: str) -> str:
         parts = cleaned.split(maxsplit=1)
         if len(parts) == 2 and parts[0].isdigit():
             cleaned = parts[1]
-    if record_type in {"MX", "NS"}:
+    if record_type in {"MX", "NS", "CNAME"}:
         cleaned = cleaned.rstrip(".")
     if record_type == "TXT":
         cleaned = cleaned.strip('"')
