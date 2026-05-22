@@ -17,9 +17,34 @@ A case is a local workspace for one public-source research thread. Cases are sto
 
 REKOS requires Python >=3.10. Python 3.12 is recommended.
 
-### Recommended: latest from GitHub
+### Recommended install
 
-Use this if you want the newest REKOS version from the main branch.
+#### macOS / Linux
+
+```bash
+pipx install rekos --python python3.12
+rekos version
+rekos quickstart
+```
+
+If your default Python is already >=3.10:
+
+```bash
+pipx install rekos
+```
+
+#### Windows PowerShell
+
+```powershell
+py -m pip install --upgrade pip
+py -m pip install --upgrade rekos
+rekos version
+rekos quickstart
+```
+
+### Latest from GitHub
+
+Use this only if you need fixes that are already on GitHub but not yet published on PyPI.
 
 #### Windows PowerShell
 
@@ -37,33 +62,6 @@ python3 -m pip uninstall -y rekos
 python3 -m pip install --force-reinstall git+https://github.com/VladTepes84/Rekos.git
 rekos version
 rekos quickstart
-```
-
-### Stable from PyPI
-
-Use this only for the latest version already published on PyPI.
-
-#### Windows PowerShell
-
-```powershell
-py -m pip install --upgrade pip
-py -m pip install --upgrade rekos
-rekos version
-rekos quickstart
-```
-
-#### macOS / Linux with pipx
-
-```bash
-pipx install rekos --python python3.12
-rekos version
-rekos quickstart
-```
-
-If your default Python is already >=3.10:
-
-```bash
-pipx install rekos
 ```
 
 ### If the `rekos` command is not found
