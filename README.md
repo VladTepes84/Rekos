@@ -220,6 +220,26 @@ The project intentionally avoids:
 - aggressive crawling
 - AI-generated investigation claims
 
+## Passive Sources And APIs
+
+REKOS uses only passive public-source integrations.
+
+Current integrations include:
+- Sherlock
+- Maigret
+- public RDAP services
+- public DNS resolution
+- crt.sh certificate transparency data
+- Wayback Machine CDX API
+- passive HTTP/TLS metadata collection
+
+REKOS does not use:
+- breached credential datasets
+- private leaks
+- authenticated scraping
+- account automation
+- active exploitation techniques
+
 ## Supported Sources
 
 | Source              | Target types    | Dependencies                     | Notes                                                                           |
