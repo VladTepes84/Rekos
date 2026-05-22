@@ -27,15 +27,31 @@ If your default Python is already >=3.10, plain `pipx install rekos` is also sup
 
 ### Windows PowerShell
 
-On Windows, `pipx` may not be installed by default. If you do not have `pipx`
-available, install REKOS with Python's `py` launcher:
+On Windows, `pipx` may not be installed by default. The simple alternative is
+`py -m pip install --upgrade rekos`.
+
+Stable from PyPI:
 
 ```powershell
 py -m pip install --upgrade pip
-py -m pip install rekos
+py -m pip install --upgrade rekos
 rekos version
 rekos quickstart
 ```
+
+PyPI is the published stable release.
+
+Latest from GitHub:
+
+```powershell
+py -m pip uninstall -y rekos
+py -m pip install --force-reinstall git+https://github.com/VladTepes84/Rekos.git
+rekos version
+rekos quickstart
+```
+
+GitHub installs the latest version of the `main` branch, which is useful when
+you want fixes that have not been published to PyPI yet.
 
 If the `rekos` command is not on your PATH yet, verify the package and run the
 module fallback:

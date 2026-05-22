@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.3
+
+- Clarified Windows installation paths for stable PyPI installs and latest GitHub main installs.
+- Prepared release metadata for REKOS 1.3.3.
+
 ## 1.3.2
 
 - Improved verbose findings output with analyst-readable category grouping, compact reasons, short IDs by default, and optional full UUID display.

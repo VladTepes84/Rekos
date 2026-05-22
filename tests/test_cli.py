@@ -251,8 +251,8 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "Common commands:" not in output
     assert "Investigations:" not in output
     assert "[+] Terminal-native. Passive OSINT. Local-first." in output
-    assert "REKOS 1.3.2" not in output
-    assert "Version: 1.3.2" in output
+    assert "REKOS 1.3.3" not in output
+    assert "Version: 1.3.3" in output
 
 
 def test_no_args_outputs_quickstart(capsys) -> None:
@@ -271,7 +271,7 @@ def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 1.3.2\n"
+    assert output == "rekos 1.3.3\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 
