@@ -17,31 +17,11 @@ A case is a local workspace for one public-source research thread. Cases are sto
 
 REKOS requires Python >=3.10. Python 3.12 is recommended.
 
-Install with pipx and Python 3.12:
+### Recommended: latest from GitHub
 
-```bash
-pipx install rekos --python python3.12
-```
+Use this if you want the newest REKOS version from the main branch.
 
-If your default Python is already >=3.10, plain `pipx install rekos` is also supported.
-
-### Windows PowerShell
-
-On Windows, `pipx` may not be installed by default. The simple alternative is
-`py -m pip install --upgrade rekos`.
-
-Stable from PyPI:
-
-```powershell
-py -m pip install --upgrade pip
-py -m pip install --upgrade rekos
-rekos version
-rekos quickstart
-```
-
-PyPI is the published stable release.
-
-Latest from GitHub:
+#### Windows PowerShell
 
 ```powershell
 py -m pip uninstall -y rekos
@@ -50,40 +30,72 @@ rekos version
 rekos quickstart
 ```
 
-GitHub installs the latest version of the `main` branch, which is useful when
-you want fixes that have not been published to PyPI yet.
+#### macOS / Linux
 
-If the `rekos` command is not on your PATH yet, verify the package and run the
-module fallback:
+```bash
+python3 -m pip uninstall -y rekos
+python3 -m pip install --force-reinstall git+https://github.com/VladTepes84/Rekos.git
+rekos version
+rekos quickstart
+```
+
+### Stable from PyPI
+
+Use this only for the latest version already published on PyPI.
+
+#### Windows PowerShell
+
+```powershell
+py -m pip install --upgrade pip
+py -m pip install --upgrade rekos
+rekos version
+rekos quickstart
+```
+
+#### macOS / Linux with pipx
+
+```bash
+pipx install rekos --python python3.12
+rekos version
+rekos quickstart
+```
+
+If your default Python is already >=3.10:
+
+```bash
+pipx install rekos
+```
+
+### If the `rekos` command is not found
+
+#### Windows PowerShell
 
 ```powershell
 py -m pip show rekos
 py -m rekos version
 ```
 
+#### macOS / Linux
+
+```bash
+python3 -m pip show rekos
+python3 -m rekos version
+```
+
 Run `rekos` with no arguments to open the quickstart screen.
 
 Users run REKOS commands such as `rekos investigate username <case> <username>` and `rekos investigate domain <case> <domain>`. REKOS calls available passive sources through its source adapters and continues cleanly when optional external tools are absent.
 
-Install from a local checkout:
+### Local development install
 
 ```bash
-git clone <repo-url>
-cd rekos
-pipx install .
-rekos --help
-```
-
-For development, use an editable install:
-
-```bash
-git clone <repo-url>
-cd rekos
+git clone https://github.com/VladTepes84/Rekos.git
+cd Rekos
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e ".[dev]"
 pytest
-rekos --help
+rekos quickstart
 ```
 
 ## Optional Integrations
