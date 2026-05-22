@@ -122,6 +122,27 @@ rekos
 
 Users always run `rekos`, not Sherlock or Maigret directly. `rekos investigate username <case> <username>` automatically uses the username sources available in the current environment.
 
+## Why Rekos Exists
+
+Rekos is not trying to replace tools like Sherlock, Maigret, or theHarvester.
+
+The goal is to provide a lightweight passive OSINT workflow with case-oriented investigations instead of isolated lookups and disconnected outputs.
+
+Rekos focuses on:
+- local-first investigations
+- passive public-source workflows
+- normalized findings
+- relationship tracking
+- evidence organization
+- CLI-native workflows
+
+The project intentionally avoids:
+- active exploitation
+- authenticated automation
+- breached datasets
+- aggressive crawling
+- AI-generated investigation claims
+
 ## Quick Start
 
 ```bash
@@ -177,6 +198,27 @@ Domain, URL, and snapshot workflows reject localhost, private/internal IP ranges
 - Graph correlation: entities and relationships connect usernames, profiles, domains, URLs, files, and notes.
 - Quality scoring: REKOS scores correlation quality from source confidence, exact or normalized matches, duplicate source confirmation, evidence presence, and graph relationships.
 - Evidence export: raw outputs, artifacts, reports, SQLite data, and manifests can be exported with `rekos export-case`.
+
+## Why Rekos Exists
+
+Rekos is not trying to replace tools like Sherlock, Maigret, or theHarvester.
+
+The goal is to provide a lightweight passive OSINT workflow with case-oriented investigations instead of isolated lookups and disconnected outputs.
+
+Rekos focuses on:
+- local-first investigations
+- passive public-source workflows
+- normalized findings
+- relationship tracking
+- evidence organization
+- CLI-native workflows
+
+The project intentionally avoids:
+- active exploitation
+- authenticated automation
+- breached datasets
+- aggressive crawling
+- AI-generated investigation claims
 
 ## Supported Sources
 
