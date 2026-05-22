@@ -17,14 +17,44 @@ A case is a local workspace for one public-source research thread. Cases are sto
 
 REKOS requires Python >=3.10. Python 3.12 is recommended.
 
-### Recommended install
+### Windows PowerShell
 
-#### macOS / Linux
+Install:
+
+```powershell
+py -m pip install --upgrade rekos
+```
+
+Run:
+
+```powershell
+rekos
+```
+
+Uninstall:
+
+```powershell
+py -m pip uninstall -y rekos
+```
+
+### macOS / Linux
+
+Install:
 
 ```bash
 pipx install rekos --python python3.12
-rekos version
-rekos quickstart
+```
+
+Run:
+
+```bash
+rekos
+```
+
+Uninstall:
+
+```bash
+pipx uninstall rekos
 ```
 
 If your default Python is already >=3.10:
@@ -33,16 +63,7 @@ If your default Python is already >=3.10:
 pipx install rekos
 ```
 
-#### Windows PowerShell
-
-```powershell
-py -m pip install --upgrade pip
-py -m pip install --upgrade rekos
-rekos version
-rekos quickstart
-```
-
-### Latest from GitHub
+### Latest version from GitHub
 
 Use this only if you need fixes that are already on GitHub but not yet published on PyPI.
 
@@ -51,8 +72,6 @@ Use this only if you need fixes that are already on GitHub but not yet published
 ```powershell
 py -m pip uninstall -y rekos
 py -m pip install --force-reinstall git+https://github.com/VladTepes84/Rekos.git
-rekos version
-rekos quickstart
 ```
 
 #### macOS / Linux
@@ -60,8 +79,6 @@ rekos quickstart
 ```bash
 python3 -m pip uninstall -y rekos
 python3 -m pip install --force-reinstall git+https://github.com/VladTepes84/Rekos.git
-rekos version
-rekos quickstart
 ```
 
 ### If the `rekos` command is not found
@@ -93,7 +110,7 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e ".[dev]"
 pytest
-rekos quickstart
+rekos
 ```
 
 ## Optional Integrations
@@ -130,7 +147,6 @@ Most users only need these commands:
 
 ```bash
 rekos
-rekos quickstart
 rekos new-case acme-osint
 rekos investigate username acme-osint alice.example
 rekos investigate domain acme-osint example.com
