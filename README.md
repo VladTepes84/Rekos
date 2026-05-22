@@ -25,6 +25,26 @@ pipx install rekos --python python3.12
 
 If your default Python is already >=3.10, plain `pipx install rekos` is also supported.
 
+### Windows PowerShell
+
+On Windows, `pipx` may not be installed by default. If you do not have `pipx`
+available, install REKOS with Python's `py` launcher:
+
+```powershell
+py -m pip install --upgrade pip
+py -m pip install rekos
+rekos version
+rekos quickstart
+```
+
+If the `rekos` command is not on your PATH yet, verify the package and run the
+module fallback:
+
+```powershell
+py -m pip show rekos
+py -m rekos version
+```
+
 Run `rekos` with no arguments to open the quickstart screen.
 
 Users run REKOS commands such as `rekos investigate username <case> <username>` and `rekos investigate domain <case> <domain>`. REKOS calls available passive sources through its source adapters and continues cleanly when optional external tools are absent.
