@@ -1548,7 +1548,13 @@ def test_investigate_username_uses_multiple_sources_and_scores_confirmations(
     assert "Platform" in findings_output
     assert "GitHub" in findings_output
     assert "https://github.com/alice" in findings_output
-    assert "maigret_username, sherlock_username, wmn_username" in findings_output
+    github_lines = [
+        line for line in findings_output.splitlines() if "https://github.com/alice" in line
+    ]
+    assert len(github_lines) == 1
+    assert github_lines[0].count("sherlock_username") == 1
+    assert github_lines[0].count("maigret_username") == 1
+    assert github_lines[0].count("wmn_username") == 1
 
     case_folder = tmp_path / "rekos_cases" / "case-username-multisource"
     with sqlite3.connect(case_folder / "rekos.db") as connection:
@@ -2708,6 +2714,8 @@ def test_findings_summary_dedupes_urls_and_normalizes_platform_labels(
     ]
     assert len(verbose_tiktok_lines) == 1
     assert "sherlock_username, wmn_username" in verbose_tiktok_lines[0]
+    assert verbose_tiktok_lines[0].count("sherlock_username") == 1
+    assert verbose_tiktok_lines[0].count("wmn_username") == 1
     assert "duplicate confirmation across sources" in verbose_tiktok_lines[0]
 
 

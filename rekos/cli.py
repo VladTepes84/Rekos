@@ -946,16 +946,19 @@ def _profile_representative_score(finding) -> tuple[int, int, int, int]:
 
 
 def _profile_group_sources(findings) -> list[str]:
-    sources: set[str] = set()
+    sources: list[str] = []
     for finding in findings:
-        sources.add(finding.source)
+        _append_source_labels(sources, finding.source)
         if finding.confirming_sources:
-            sources.update(
-                source.strip()
-                for source in finding.confirming_sources.split(",")
-                if source.strip()
-            )
-    return sorted(sources)
+            _append_source_labels(sources, finding.confirming_sources)
+    return sources
+
+
+def _append_source_labels(sources: list[str], value: str) -> None:
+    for source in value.split(","):
+        label = source.strip()
+        if label and label not in sources:
+            sources.append(label)
 
 
 def _profile_group_confidence(findings, sources: list[str]) -> str:

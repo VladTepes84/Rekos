@@ -19,23 +19,14 @@ def render_banner() -> Group:
 
     title = _figlet_text() or _fallback_text()
     title.stylize("bold bright_cyan")
-    ready = _ready_text()
-    ready.stylize("bold magenta")
-    status = Text.assemble(
-        ("╱╱ ◥◣", "bold blue"),
-        (" ◢◤  ", "bold bright_cyan"),
-        ("REKOS READY", "bold magenta"),
-        ("  ◥◣ ", "bold bright_cyan"),
-        ("◢◤ ╲╲", "bold blue"),
-    )
+    status = Text("REKOS READY", style="bold magenta")
     subtitle = Text(
         "TERMINAL-NATIVE // PASSIVE OSINT // LOCAL-FIRST CORRELATION",
         style="bright_cyan",
     )
     top = Panel(
         Group(
-            Align.center(_title_with_eyes(title)),
-            Align.center(ready),
+            Align.center(title),
             Align.center(status),
             Align.center(subtitle),
         ),
@@ -103,46 +94,6 @@ def _fallback_text() -> Text:
             ]
         )
     )
-
-
-def _ready_text() -> Text:
-    return Text(
-        "\n".join(
-            [
-                "   ____  _________    ____  __",
-                "  / __ \\/ ____/   |  / __ \\/ /",
-                " / /_/ / __/ / /| | / / / / / ",
-                "/ _, _/ /___/ ___ |/ /_/ /_/  ",
-                "/_/ |_/_____/_/  |_/_____(_)   ",
-            ]
-        )
-    )
-
-
-def _title_with_eyes(title: Text) -> Text:
-    title_lines = title.plain.splitlines()
-    left_eye = ["╱◢▰▰◣", "◢◤◉◥", "╲◥▰▰◤", "", "", ""]
-    right_eye = ["◢▰▰◣╲", "◤◉◥◣", "◥▰▰◤╱", "", "", ""]
-    rows: list[Text] = []
-    for index, line in enumerate(title_lines):
-        row = Text()
-        if index < len(left_eye) and left_eye[index]:
-            row.append(f"{left_eye[index]:<8}", style="bold magenta")
-        else:
-            row.append(" " * 8)
-        row.append(" ")
-        row.append(line, style="bold bright_cyan")
-        row.append(" ")
-        if index < len(right_eye) and right_eye[index]:
-            row.append(f"{right_eye[index]:>8}", style="bold blue")
-        rows.append(row)
-
-    combined = Text()
-    for index, row in enumerate(rows):
-        if index:
-            combined.append("\n")
-        combined.append(row)
-    return combined
 
 
 def _quickstart_table() -> Text:
