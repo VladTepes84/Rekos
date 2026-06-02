@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.4
+
+- Added passive email enrichment and optional HIBP breach exposure workflow.
+- Added LinkedIn to conservative username profile template checks.
+- Updated the quickstart README image for the expanded email workflow.
+
 ## 1.3.3
 
 - Clarified Windows installation paths for stable PyPI installs and latest GitHub main installs.

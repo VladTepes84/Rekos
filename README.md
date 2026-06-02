@@ -149,6 +149,8 @@ The project intentionally avoids:
 rekos new-case social_test
 rekos investigate username social_test username
 rekos investigate email social_test alice@example.com
+rekos enrich email social_test alice@example.com
+rekos check-breach social_test alice@example.com
 rekos findings social_test
 rekos findings social_test --verbose
 rekos score social_test
@@ -172,6 +174,8 @@ rekos
 rekos new-case acme-osint
 rekos investigate username acme-osint alice.example
 rekos investigate email acme-osint alice@example.com
+rekos enrich email acme-osint alice@example.com
+rekos check-breach acme-osint alice@example.com
 rekos investigate domain acme-osint example.com
 rekos snapshot-url acme-osint https://example.com/profile/alice
 rekos findings acme-osint
@@ -191,6 +195,8 @@ During `rekos investigate username <case> <username>`, REKOS generates safe user
 During `rekos investigate domain <case> <domain>`, REKOS runs passive DNS, RDAP with registry/WHOIS fallback, HTTP/HTTPS endpoint checks, TLS certificate metadata collection, and crt.sh certificate transparency lookup when available. It records registration evidence, DNS records, web endpoint metadata, redirects, TLS certificate summaries, SPF/mail-security summaries, provider hints from TXT records, and certificate transparency findings.
 
 During `rekos investigate email <case> <email>`, REKOS validates and normalizes the address, extracts the domain, checks passive public DNS MX/SPF/DMARC records, records provider hints, and stores a local Gravatar MD5 hash without checking account existence.
+
+Use `rekos enrich email <case> <email>` for optional passive enrichment such as unverified username candidates derived from the local-part and public Gravatar avatar metadata. Use `rekos check-breach <case> <email>` only when `REKOS_HIBP_API_KEY` is configured; it records breach exposure metadata from Have I Been Pwned without collecting passwords or credential material.
 
 Domain, URL, and snapshot workflows reject localhost, private/internal IP ranges, link-local addresses, metadata-service IPs, reserved, multicast, and unspecified IP targets. REKOS is for public-source targets only.
 
@@ -238,11 +244,13 @@ Current integrations include:
 - passive HTTP/TLS metadata collection
 
 REKOS does not use:
-- breached credential datasets
+- private breached credential datasets or password material
 - private leaks
 - authenticated scraping
 - account automation
 - active exploitation techniques
+
+Optional breach exposure checks use legitimate public APIs such as Have I Been Pwned when the user provides an API key. REKOS records exposure metadata only and does not collect passwords, credential material, or account ownership claims.
 
 ## Supported Sources
 
@@ -250,8 +258,10 @@ REKOS does not use:
 |---------------------|-----------------|----------------------------------|---------------------------------------------------------------------------------|
 | `sherlock_username` | `username`      | `sherlock` binary                | Runs Sherlock with safe subprocess arguments and parses public profile URLs.     |
 | `maigret_username`  | `username`      | optional `maigret` package/tool  | Runs Maigret when installed; REKOS continues without it.                        |
-| `wmn_username`      | `username`      | none                             | Checks local public profile URL templates with conservative passive HTTP validation. |
+| `wmn_username`      | `username`      | none                             | Checks local public profile URL templates, including LinkedIn, with conservative passive HTTP validation. |
 | `email_passive`     | `email`         | none                             | Checks passive public MX/SPF/DMARC records and local email metadata only.        |
+| `email_enrichment`  | `email`         | none                             | Derives unverified username candidates and checks public Gravatar avatar metadata. |
+| `hibp_breach`       | `email`         | `REKOS_HIBP_API_KEY` env var     | Optional Have I Been Pwned breach exposure check; no passwords or credential material. |
 | `http_snapshot`     | `url`           | none                             | Captures public HTTP response artifacts and optional Playwright screenshot.      |
 | `rdap_domain`       | `domain`        | none                             | Uses public HTTPS RDAP lookup with registry and WHOIS fallback where available.  |
 | `dns_domain`        | `domain`        | none                             | Fetches public DNS A/AAAA/MX/NS/TXT records and extracts SPF/provider hints.     |

@@ -20,6 +20,8 @@ from .exporting import export_case
 from .hashfile import sha256_file
 from .investigation import (
     SourceInvestigationFailure,
+    check_email_breach,
+    enrich_email,
     investigate_domain,
     investigate_email,
     investigate_url,
@@ -148,6 +150,16 @@ def build_parser() -> argparse.ArgumentParser:
     investigate_url_parser = investigate_subparsers.add_parser("url", help="Investigate a URL")
     investigate_url_parser.add_argument("case")
     investigate_url_parser.add_argument("url")
+
+    enrich = subparsers.add_parser("enrich", help="Run optional passive enrichment workflows")
+    enrich_subparsers = enrich.add_subparsers(dest="enrichment_type", required=True)
+    enrich_email_parser = enrich_subparsers.add_parser("email", help="Enrich an email target")
+    enrich_email_parser.add_argument("case")
+    enrich_email_parser.add_argument("email")
+
+    check_breach = subparsers.add_parser("check-breach", help="Check optional breach exposure sources")
+    check_breach.add_argument("case")
+    check_breach.add_argument("email")
 
     show_investigation = subparsers.add_parser("show-investigation", help="Show investigation results")
     show_investigation.add_argument("case")
@@ -379,6 +391,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "investigate" and args.investigation_type == "email":
             result = investigate_email(args.case, args.email, store)
             _print_email_investigation_summary(args.case, result, store)
+            return 0
+
+        if args.command == "enrich" and args.enrichment_type == "email":
+            result = enrich_email(args.case, args.email, store)
+            _print_email_enrichment_summary(args.case, result, store)
+            return 0
+
+        if args.command == "check-breach":
+            result = check_email_breach(args.case, args.email, store)
+            _print_email_breach_summary(args.case, result, store)
             return 0
 
         if args.command == "investigate" and args.investigation_type == "url":
@@ -694,10 +716,91 @@ def _print_email_investigation_summary(case: str, result, store: CaseStore) -> N
             console.print(f"- {failure.source}: {failure.error}")
     console.print()
     console.print("Next steps:")
+    console.print(f"- rekos enrich email {case} {result.target}")
+    console.print(f"- rekos check-breach {case} {result.target}")
     console.print(f"- rekos findings {case}")
     console.print(f"- rekos findings {case} --verbose")
     console.print(f"- rekos graph-summary {case}")
     console.print(f"- rekos export-case {case} --output {case}.zip")
+
+
+def _print_email_enrichment_summary(case: str, result, store: CaseStore) -> None:
+    findings = store.findings(case, refresh_scores=True)
+    related_findings = [
+        finding
+        for finding in findings
+        if finding.source == "email_enrichment"
+        and (
+            result.target.lower() in finding.raw_reference.lower()
+            or result.target.split("@", 1)[0].lower() in finding.value.lower()
+            or "gravatar.com/avatar/" in finding.value
+        )
+    ]
+    username_candidates = [
+        finding
+        for finding in related_findings
+        if finding.value.startswith("Unverified username candidate from email:")
+    ]
+    gravatar_hits = [
+        finding
+        for finding in related_findings
+        if finding.finding_type == "discovered_url" and "gravatar.com/avatar/" in finding.value
+    ]
+    console.print(f"[green]Completed email enrichment[/green] {result.target}")
+    console.print(f"Signals discovered: {result.results}")
+    console.print()
+    console.print("Signal breakdown:")
+    console.print(f"- Username candidates {len(username_candidates)}")
+    console.print(f"- Gravatar avatar     {'found' if gravatar_hits else 'not found or not checked'}")
+    preview = [*username_candidates[:5], *gravatar_hits[:2]]
+    if preview:
+        console.print()
+        console.print("Key signals:")
+        for finding in preview:
+            console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
+    if result.failures:
+        console.print()
+        console.print("Warnings:")
+        for failure in result.failures:
+            console.print(f"- {failure.source}: {failure.error}")
+    console.print()
+    console.print("Next steps:")
+    console.print(f"- rekos findings {case}")
+    console.print(f"- rekos findings {case} --verbose")
+    console.print(f"- rekos check-breach {case} {result.target}")
+    console.print(f"- rekos graph-summary {case}")
+
+
+def _print_email_breach_summary(case: str, result, store: CaseStore) -> None:
+    findings = store.findings(case, refresh_scores=True)
+    breach_findings = [
+        finding
+        for finding in findings
+        if finding.source == "hibp_breach"
+    ]
+    console.print(f"[green]Completed email breach check[/green] {result.target}")
+    console.print(f"Exposure records: {result.results}")
+    if breach_findings:
+        console.print()
+        console.print("Exposure summary:")
+        for finding in breach_findings[:8]:
+            console.print(f"- {_preview_value(finding.value)}", markup=False)
+        if len(breach_findings) > 8:
+            console.print(f"- ... and {len(breach_findings) - 8} more records")
+    if result.failures:
+        console.print()
+        console.print("Warnings:")
+        for failure in result.failures:
+            console.print(f"- {failure.source}: {failure.error}")
+    console.print()
+    console.print("Notes:")
+    console.print("- Breach exposure is a source report, not proof of account ownership.")
+    console.print("- REKOS never collects passwords or credential material.")
+    console.print()
+    console.print("Next steps:")
+    console.print(f"- rekos findings {case}")
+    console.print(f"- rekos findings {case} --verbose")
+    console.print(f"- rekos graph-summary {case}")
 
 
 def _sorted_profiles(profiles) -> list:
@@ -1057,6 +1160,7 @@ def _profile_platform_label(url: str, platform: str) -> str:
         "github.com": "GitHub",
         "reddit.com": "Reddit",
         "instagram.com": "Instagram",
+        "linkedin.com": "LinkedIn",
         "x.com": "X/Twitter",
         "twitter.com": "X/Twitter",
         "tiktok.com": "TikTok",
@@ -1084,6 +1188,7 @@ def _friendly_platform_label(value: str) -> str:
         "github": "GitHub",
         "reddit": "Reddit",
         "instagram": "Instagram",
+        "linkedin": "LinkedIn",
         "twitter": "X/Twitter",
         "x": "X/Twitter",
         "tiktok": "TikTok",
@@ -1158,6 +1263,7 @@ def _key_findings(findings) -> list:
     priority = {
         "registration_record": 0,
         "mail_security": 1,
+        "breach_exposure": 2,
         "web_endpoint": 2,
         "http_redirect": 3,
         "tls_certificate": 4,
@@ -1322,6 +1428,7 @@ def _finding_category_order() -> list[str]:
         "registration",
         "dns",
         "mail_security",
+        "exposure",
         "web_http",
         "tls",
         "provider_hints",
@@ -1338,6 +1445,8 @@ def _finding_category(finding) -> str:
         return "dns"
     if finding_type == "mail_security":
         return "mail_security"
+    if finding_type == "breach_exposure":
+        return "exposure"
     if finding_type in {"web_endpoint", "http_redirect"}:
         return "web_http"
     if finding_type in {"tls_certificate", "certificate_record"}:
@@ -1354,6 +1463,7 @@ def _finding_category_title(category: str) -> str:
         "registration": "Registration",
         "dns": "DNS",
         "mail_security": "Mail security",
+        "exposure": "Exposure",
         "web_http": "Web / HTTP",
         "tls": "TLS",
         "provider_hints": "Provider hints (heuristic / low confidence)",
@@ -1370,6 +1480,8 @@ def _compact_finding_value(finding) -> str:
     value = " ".join(finding.value.strip().split())
     if finding.finding_type == "provider_hint":
         value = f"heuristic indicator: {value}"
+    if finding.finding_type == "breach_exposure":
+        value = f"exposure source report: {value}"
     return _truncate_text(value, 140)
 
 
@@ -1463,6 +1575,10 @@ def _summary_value_key(value: str) -> str:
 
 
 def _finding_summary_label(finding) -> str:
+    if finding.finding_type == "breach_exposure":
+        return "Breach"
+    if finding.source == "email_enrichment" and finding.value.startswith("Unverified username candidate"):
+        return "Candidate"
     if finding.finding_type == "discovered_profile":
         host = urlparse(finding.value).hostname or ""
         normalized_host = host.lower().removeprefix("www.")
@@ -1470,6 +1586,7 @@ def _finding_summary_label(finding) -> str:
             "github.com": "GitHub",
             "tiktok.com": "TikTok",
             "youtube.com": "YouTube",
+            "linkedin.com": "LinkedIn",
             "t.me": "Telegram",
             "scratch.mit.edu": "Scratch",
             "steamcommunity.com": "Steam",

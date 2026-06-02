@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import ssl
@@ -12,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from rekos.errors import ExternalToolExecutionError
+from rekos.errors import ExternalToolExecutionError, ExternalToolMissingError
 from rekos.public_targets import normalize_public_http_url, validate_public_host
 
 from .base import AdapterResult, BaseSourceAdapter, SourceRunResult
@@ -43,6 +44,10 @@ PROVIDER_HINTS = {
     "atlassian": ("atlassian-domain-verification", "atlassian"),
     "brevo": ("brevo", "sendinblue"),
     "esva": ("esvacloud", "esva"),
+    "proton": ("protonmail", "proton.me"),
+    "zoho": ("zoho", "zohomail"),
+    "aruba": ("aruba.it", "arubabusiness"),
+    "ovh": ("ovh.net", "ovh.com"),
 }
 
 
@@ -477,6 +482,265 @@ class EmailPassiveAdapter(BaseSourceAdapter):
                     )
                     _record_provider_evidence(provider_evidence, value)
         results.extend(_provider_hint_results(self.name, email, provider_evidence))
+        return results
+
+
+class EmailEnrichmentAdapter(BaseSourceAdapter):
+    name = "email_enrichment"
+    description = "Collect passive public/local enrichment signals for an email address."
+    supported_target_types = ("email",)
+    passive_only = True
+    external_dependencies: tuple[str, ...] = ()
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        email = normalize_email(target)
+        raw_output = self.run(case, email)
+        artifact_path = self._write_source_output(case, email, store, raw_output)
+        results = self.parse_results(email, raw_output)
+        store.add_adapter_results(case, results)
+
+        email_entity = store.ensure_entity(case, "email", email, "Email enrichment target")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
+        for result in results:
+            if result.platform == "email_username_candidate":
+                entity = store.ensure_entity(
+                    case,
+                    "username",
+                    result.url,
+                    "Unverified username candidate derived from email local part",
+                )
+            elif result.platform == "gravatar_avatar":
+                entity = store.ensure_entity(
+                    case,
+                    "url",
+                    result.url,
+                    "Public Gravatar avatar URL",
+                )
+            else:
+                entity = store.ensure_entity(
+                    case,
+                    "note",
+                    result.url,
+                    "Email enrichment metadata",
+                )
+            if entity.entity_id != email_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    email_entity.entity_id,
+                    entity.entity_id,
+                    "related_to",
+                    result.confidence,
+                    "Passive email enrichment observation",
+                )
+            if entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "Email enrichment source produced observation",
+                )
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {email}")
+        return SourceRunResult(
+            source=self.name,
+            target=email,
+            raw_output=raw_output,
+            results=results,
+            artifacts=[artifact_path],
+        )
+
+    def run(self, case: str, target: str) -> str:
+        email = normalize_email(target)
+        local_part, domain = email.split("@", 1)
+        digest = md5(email.encode("utf-8"), usedforsecurity=False).hexdigest()
+        gravatar_url = f"https://www.gravatar.com/avatar/{digest}?d=404"
+        return json.dumps(
+            {
+                "source": self.name,
+                "target": email,
+                "local_part": local_part,
+                "domain": domain,
+                "username_candidates": _email_username_candidates(local_part),
+                "gravatar_md5": digest,
+                "gravatar": _fetch_gravatar_status(gravatar_url),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
+        email = normalize_email(target)
+        parsed = _load_json(raw_output)
+        if not isinstance(parsed, dict):
+            return []
+        results: list[AdapterResult] = []
+        for candidate in parsed.get("username_candidates", []):
+            if isinstance(candidate, str) and candidate:
+                results.append(
+                    AdapterResult(
+                        source=self.name,
+                        target=email,
+                        url=candidate,
+                        platform="email_username_candidate",
+                        confidence="low",
+                        raw_reference=(
+                            f"Unverified username candidate derived from email local part: {candidate}"
+                        ),
+                    )
+                )
+        gravatar = parsed.get("gravatar")
+        if isinstance(gravatar, dict) and gravatar.get("status") == "found":
+            avatar_url = str(gravatar.get("url") or "")
+            if avatar_url:
+                results.append(
+                    AdapterResult(
+                        source=self.name,
+                        target=email,
+                        url=avatar_url,
+                        platform="gravatar_avatar",
+                        confidence="medium",
+                        raw_reference=(
+                            "Public Gravatar avatar URL found; this is a correlation signal, "
+                            "not proof of account ownership."
+                        ),
+                    )
+                )
+        return results
+
+
+class HibpBreachAdapter(BaseSourceAdapter):
+    name = "hibp_breach"
+    description = "Check Have I Been Pwned breach exposure with an optional API key."
+    supported_target_types = ("email",)
+    passive_only = True
+    external_dependencies: tuple[str, ...] = ()
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        email = normalize_email(target)
+        api_key = os.environ.get("REKOS_HIBP_API_KEY", "").strip()
+        if not api_key:
+            raise ExternalToolMissingError(
+                "Set REKOS_HIBP_API_KEY to enable Have I Been Pwned breach checks."
+            )
+        raw_output = self.run(case, email)
+        artifact_path = self._write_source_output(case, email, store, raw_output)
+        results = self.parse_results(email, raw_output)
+        store.add_adapter_results(case, results)
+
+        email_entity = store.ensure_entity(case, "email", email, "Email breach check target")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
+        for result in results:
+            entity = store.ensure_entity(
+                case,
+                "breach_exposure",
+                result.url,
+                "HIBP breach exposure result",
+            )
+            if entity.entity_id != email_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    email_entity.entity_id,
+                    entity.entity_id,
+                    "related_to",
+                    result.confidence,
+                    "Breach exposure reported by HIBP",
+                )
+            if entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "HIBP source produced exposure result",
+                )
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {email}")
+        return SourceRunResult(
+            source=self.name,
+            target=email,
+            raw_output=raw_output,
+            results=results,
+            artifacts=[artifact_path],
+        )
+
+    def run(self, case: str, target: str) -> str:
+        email = normalize_email(target)
+        api_key = os.environ.get("REKOS_HIBP_API_KEY", "").strip()
+        if not api_key:
+            raise ExternalToolMissingError(
+                "Set REKOS_HIBP_API_KEY to enable Have I Been Pwned breach checks."
+            )
+        url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{quote(email)}?truncateResponse=false"
+        request = Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "hibp-api-key": api_key,
+            },
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=SOURCE_TIMEOUT_SECONDS) as response:
+                body = response.read(MAX_SOURCE_BYTES)
+                status = int(getattr(response, "status", 0) or getattr(response, "getcode", lambda: 0)())
+        except HTTPError as exc:
+            if exc.code == 404:
+                return json.dumps(
+                    {
+                        "source": self.name,
+                        "target": email,
+                        "status": 404,
+                        "breaches": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            raise ExternalToolExecutionError(f"HIBP request failed for {email}: HTTP {exc.code}") from exc
+        except (OSError, TimeoutError, URLError) as exc:
+            raise ExternalToolExecutionError(f"HIBP request failed for {email}: {exc}") from exc
+        return json.dumps(
+            {
+                "source": self.name,
+                "target": email,
+                "status": status,
+                "breaches": _load_json(body.decode("utf-8", errors="replace")),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
+        email = normalize_email(target)
+        parsed = _load_json(raw_output)
+        if not isinstance(parsed, dict):
+            return []
+        breaches = parsed.get("breaches", [])
+        if not isinstance(breaches, list):
+            return []
+        results: list[AdapterResult] = []
+        for breach in breaches:
+            if not isinstance(breach, dict):
+                continue
+            name = str(breach.get("Name") or breach.get("Title") or "").strip()
+            if not name:
+                continue
+            breach_date = str(breach.get("BreachDate") or "unknown date")
+            data_classes = breach.get("DataClasses", [])
+            exposed = ", ".join(str(item) for item in data_classes[:5]) if isinstance(data_classes, list) else ""
+            summary = f"HIBP breach exposure: {name} ({breach_date})"
+            if exposed:
+                summary = f"{summary}; exposed data classes: {exposed}"
+            results.append(
+                AdapterResult(
+                    source=self.name,
+                    target=email,
+                    url=summary,
+                    platform="breach_exposure",
+                    confidence="medium",
+                    raw_reference=json.dumps(breach, sort_keys=True),
+                )
+            )
         return results
 
 
@@ -990,6 +1254,51 @@ def _record_provider_evidence(evidence: dict[str, list[str]], value: str) -> Non
                 entries.append(value)
 
 
+def _email_username_candidates(local_part: str) -> list[str]:
+    base = local_part.split("+", 1)[0].strip().lower()
+    candidates = [
+        base,
+        base.replace(".", ""),
+        base.replace("_", ""),
+        base.replace("-", ""),
+        base.replace(".", "_").replace("-", "_"),
+        base.replace("_", ".").replace("-", "."),
+        re.sub(r"[^a-z0-9]+", "", base),
+    ]
+    parts = [part for part in re.split(r"[._-]+", base) if part]
+    if len(parts) >= 2:
+        candidates.extend([".".join(parts), "_".join(parts), "".join(parts)])
+    return _dedupe([candidate for candidate in candidates if candidate and len(candidate) <= 80])
+
+
+def _fetch_gravatar_status(url: str) -> dict[str, Any]:
+    request = Request(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=SOURCE_TIMEOUT_SECONDS) as response:
+            status = int(getattr(response, "status", 0) or getattr(response, "getcode", lambda: 0)())
+            final_url = str(getattr(response, "geturl", lambda: url)() or url)
+            headers = dict(response.headers.items())
+            response.read(min(MAX_SOURCE_BYTES, 4096))
+    except HTTPError as exc:
+        if exc.code == 404:
+            return {"status": "not_found", "http_status": 404, "url": url}
+        return {"status": "warning", "http_status": exc.code, "error": str(exc), "url": url}
+    except (OSError, TimeoutError, URLError) as exc:
+        return {"status": "warning", "error": str(exc), "url": url}
+    if status == 200:
+        return {
+            "status": "found",
+            "http_status": status,
+            "url": final_url,
+            "content_type": _header_value(headers, "content-type"),
+        }
+    return {"status": "warning", "http_status": status, "url": final_url}
+
+
 def _spf_summary(value: str) -> str:
     mechanisms = value.split()
     includes = [item.removeprefix("include:") for item in mechanisms if item.startswith("include:")]
@@ -1105,6 +1414,12 @@ def _email_entity_type(platform: str) -> str:
         return "mail_security"
     if normalized == "provider_hint":
         return "provider"
+    if normalized == "email_username_candidate":
+        return "username"
+    if normalized == "gravatar_avatar":
+        return "url"
+    if normalized == "breach_exposure":
+        return "breach_exposure"
     return "note"
 
 

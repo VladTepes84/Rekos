@@ -123,7 +123,7 @@ def investigate_username(
             )
             source_export_path = adapter._write_source_output(case, run_target, store, raw_output)
             adapter_results = [
-                _with_confidence(result, profile_confidence(variant))
+                _with_confidence(result, _profile_result_confidence(result, variant))
                 for result in adapter.parse_results(run_target, raw_output)
             ]
             normalized_results = [
@@ -221,12 +221,61 @@ def investigate_email(case: str, email: str, store: CaseStore) -> MultiSourceInv
     )
 
 
+def enrich_email(case: str, email: str, store: CaseStore) -> MultiSourceInvestigationResult:
+    normalized_email = normalize_email(email)
+    return _investigate_sources(
+        case=case,
+        target_type="email",
+        target=normalized_email,
+        sources=("email_enrichment",),
+        entity_type="email",
+        store=store,
+    )
+
+
+def check_email_breach(case: str, email: str, store: CaseStore) -> MultiSourceInvestigationResult:
+    normalized_email = normalize_email(email)
+    return _investigate_sources(
+        case=case,
+        target_type="email",
+        target=normalized_email,
+        sources=("hibp_breach",),
+        entity_type="email",
+        store=store,
+    )
+
+
 def profile_confidence(variant: UsernameVariant) -> str:
     if variant.confidence is None:
         return "high"
     if variant.confidence in {"high", "medium"}:
         return "medium"
     return "low"
+
+
+def _profile_result_confidence(result: AdapterResult, variant: UsernameVariant) -> str:
+    if result.source == "wmn_username":
+        return _wmn_result_confidence(result, variant)
+    return profile_confidence(variant)
+
+
+def _wmn_result_confidence(result: AdapterResult, variant: UsernameVariant) -> str:
+    adapter_confidence = _normalize_confidence(result.confidence)
+    variant_confidence = profile_confidence(variant)
+    if _confidence_rank(adapter_confidence) <= _confidence_rank(variant_confidence):
+        return adapter_confidence
+    return variant_confidence
+
+
+def _normalize_confidence(confidence: str) -> str:
+    cleaned = confidence.strip().lower()
+    if cleaned in {"low", "medium", "high"}:
+        return cleaned
+    return "medium"
+
+
+def _confidence_rank(confidence: str) -> int:
+    return {"low": 1, "medium": 2, "high": 3}.get(confidence, 2)
 
 
 def _with_confidence(result: AdapterResult, confidence: str) -> AdapterResult:
@@ -332,6 +381,12 @@ def _investigate_sources(
 
         try:
             result = adapter.execute(case, target, store)
+        except ExternalToolMissingError as exc:
+            skipped_count += 1
+            failures.append(SourceInvestigationFailure(source=adapter.name, error=str(exc)))
+            store.add_source_run(case, adapter.name, target, "skipped", 0, str(exc))
+            store.add_timeline_event(case, "source.skipped", f"Skipped source {adapter.name}: {exc}")
+            continue
         except (OSError, RekosError, ValueError) as exc:
             failures.append(SourceInvestigationFailure(source=adapter.name, error=str(exc)))
             store.add_source_run(case, adapter.name, target, "failed", 0, str(exc))
@@ -339,9 +394,13 @@ def _investigate_sources(
             continue
         sources_run += 1
         result_count += len(result.results)
-        store.add_source_run(case, adapter.name, target, "ok", len(result.results))
+        if result.skipped:
+            skipped_count += 1
+            store.add_source_run(case, adapter.name, target, "skipped", len(result.results))
+        else:
+            store.add_source_run(case, adapter.name, target, "ok", len(result.results))
 
-    failed_count = len(failures) - skipped_count
+    failed_count = max(0, len(failures) - skipped_count)
     store.add_source_investigation(
         case,
         target_type,

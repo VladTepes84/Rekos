@@ -8,6 +8,10 @@
     "url_template": "https://www.instagram.com/{username}/"
   },
   {
+    "platform": "LinkedIn",
+    "url_template": "https://www.linkedin.com/in/{username}/"
+  },
+  {
     "platform": "Reddit",
     "url_template": "https://www.reddit.com/user/{username}"
   },

@@ -243,6 +243,8 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "rekos new-case my_case" in output
     assert "rekos investigate username my_case username" in output
     assert "rekos investigate email my_case alice@example.com" in output
+    assert "rekos enrich email my_case alice@example.com" in output
+    assert "rekos check-breach my_case alice@example.com" in output
     assert "rekos investigate domain my_case example.com" in output
     assert "rekos findings my_case" in output
     assert "rekos findings my_case --verbose" in output
@@ -252,8 +254,8 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "Common commands:" not in output
     assert "Investigations:" not in output
     assert "[+] Terminal-native. Passive OSINT. Local-first." in output
-    assert "REKOS 1.3.3" not in output
-    assert "Version: 1.3.3" in output
+    assert "REKOS 1.3.4" not in output
+    assert "Version: 1.3.4" in output
 
 
 def test_no_args_outputs_quickstart(capsys) -> None:
@@ -272,7 +274,7 @@ def test_version_command_outputs_package_version(capsys) -> None:
     assert main(["version"]) == 0
 
     output = capsys.readouterr().out
-    assert output == "rekos 1.3.3\n"
+    assert output == "rekos 1.3.4\n"
     assert "REKOS READY" not in output
     assert "██████" not in output
 
@@ -356,7 +358,9 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sorted(sources) == [
         "crtsh_domain",
         "dns_domain",
+        "email_enrichment",
         "email_passive",
+        "hibp_breach",
         "http_snapshot",
         "maigret_username",
         "rdap_domain",
@@ -377,6 +381,10 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["dns_domain"].external_dependencies == ()
     assert sources["email_passive"].supported_target_types == ("email",)
     assert sources["email_passive"].external_dependencies == ()
+    assert sources["email_enrichment"].supported_target_types == ("email",)
+    assert sources["email_enrichment"].external_dependencies == ()
+    assert sources["hibp_breach"].supported_target_types == ("email",)
+    assert sources["hibp_breach"].external_dependencies == ()
     assert sources["rdap_domain"].supported_target_types == ("domain",)
     assert sources["web_domain"].supported_target_types == ("domain",)
     assert sources["web_domain"].external_dependencies == ()
@@ -592,6 +600,76 @@ def test_wmn_source_list_contains_instagram_template() -> None:
         "platform": "Instagram",
         "url_template": "https://www.instagram.com/{username}/",
     } in source_list
+
+
+def test_wmn_source_list_contains_linkedin_template() -> None:
+    source_list = json.loads(Path("rekos/adapters/wmn_sources.json").read_text(encoding="utf-8"))
+
+    assert {
+        "platform": "LinkedIn",
+        "url_template": "https://www.linkedin.com/in/{username}/",
+    } in source_list
+
+
+def test_wmn_linkedin_template_hit_is_low_confidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rekos.adapters.wmn._load_sources",
+        lambda: [
+            SimpleNamespace(
+                platform="LinkedIn",
+                url_template="https://www.linkedin.com/in/{username}/",
+            )
+        ],
+    )
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 10
+        assert request.full_url == "https://www.linkedin.com/in/alice/"
+        return FakeHttpResponse(200, b"")
+
+    monkeypatch.setattr("rekos.adapters.wmn.urlopen", fake_urlopen)
+
+    adapter = WmnUsernameAdapter()
+    raw_output = adapter.run("case", "alice")
+    results = adapter.parse_results("alice", raw_output)
+
+    assert results == [
+        AdapterResult(
+            source="wmn_username",
+            target="alice",
+            url="https://www.linkedin.com/in/alice/",
+            platform="linkedin",
+            confidence="low",
+            raw_reference=(
+                "HTTP status: 200; warning: LinkedIn HTTP 200 template hit; "
+                "low confidence unless cross-source confirmed"
+            ),
+        )
+    ]
+
+
+def test_wmn_linkedin_blocked_response_creates_no_finding(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rekos.adapters.wmn._load_sources",
+        lambda: [
+            SimpleNamespace(
+                platform="LinkedIn",
+                url_template="https://www.linkedin.com/in/{username}/",
+            )
+        ],
+    )
+
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 999, "Request denied", hdrs=None, fp=None)
+
+    monkeypatch.setattr("rekos.adapters.wmn.urlopen", fake_urlopen)
+
+    adapter = WmnUsernameAdapter()
+    raw_output = adapter.run("case", "alice")
+    results = adapter.parse_results("alice", raw_output)
+
+    assert results == []
+    assert "LinkedIn blocked or rate-limited passive request" in raw_output
 
 
 def test_sources_run_wmn_username_creates_profile_finding(
@@ -2446,6 +2524,147 @@ def test_investigate_email_rejects_invalid_email(
     assert "Invalid email address" in output
 
 
+def test_enrich_email_records_candidates_and_gravatar(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        assert request.full_url.startswith("https://www.gravatar.com/avatar/")
+        return FakeHttpResponse(
+            200,
+            b"avatar",
+            final_url=request.full_url,
+            headers={"Content-Type": "image/png"},
+        )
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-email-enrichment"]) == 0
+    assert main(["enrich", "email", "case-email-enrichment", "Alice.Smith+test@Example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed email enrichment alice.smith+test@example.com" in output
+    assert "Username candidates" in output
+    assert "Gravatar avatar     found" in output
+    assert "rekos check-breach case-email-enrichment alice.smith+test@example.com" in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-email-enrichment"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence
+            FROM normalized_findings
+            ORDER BY type, value
+            """
+        ).fetchall()
+        source_run = connection.execute(
+            "SELECT source, status, result_count FROM source_runs"
+        ).fetchone()
+        entity_counts = dict(
+            connection.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            ).fetchall()
+        )
+
+    assert source_run[0:2] == ("email_enrichment", "ok")
+    assert source_run[2] >= 4
+    assert any(
+        row == (
+            "metadata_record",
+            "Unverified username candidate from email: alice.smith",
+            "email_enrichment",
+            "low",
+        )
+        for row in finding_rows
+    )
+    assert any(row[0] == "discovered_url" and "gravatar.com/avatar/" in row[1] for row in finding_rows)
+    assert entity_counts["email"] == 1
+    assert entity_counts["username"] >= 1
+    assert entity_counts["url"] == 1
+
+
+def test_check_breach_skips_without_api_key(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("REKOS_HIBP_API_KEY", raising=False)
+
+    assert main(["new-case", "case-email-breach-missing-key"]) == 0
+    assert main(["check-breach", "case-email-breach-missing-key", "alice@example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed email breach check alice@example.com" in output
+    assert "Exposure records: 0" in output
+    assert "REKOS_HIBP_API_KEY" in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-email-breach-missing-key"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        source_run = connection.execute(
+            "SELECT source, status, result_count, error FROM source_runs"
+        ).fetchone()
+        findings_count = connection.execute("SELECT COUNT(*) FROM normalized_findings").fetchone()[0]
+
+    assert source_run[0:3] == ("hibp_breach", "skipped", 0)
+    assert "REKOS_HIBP_API_KEY" in source_run[3]
+    assert findings_count == 0
+
+
+def test_check_breach_records_hibp_exposure(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("REKOS_HIBP_API_KEY", "test-key")
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        assert request.full_url.startswith("https://haveibeenpwned.com/api/v3/breachedaccount/alice%40example.com")
+        assert request.headers["Hibp-api-key"] == "test-key"
+        return FakeHttpResponse(
+            200,
+            json.dumps(
+                [
+                    {
+                        "Name": "ExampleBreach",
+                        "Title": "Example Breach",
+                        "BreachDate": "2025-01-01",
+                        "DataClasses": ["Email addresses", "Usernames"],
+                    }
+                ]
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-email-breach"]) == 0
+    assert main(["check-breach", "case-email-breach", "alice@example.com"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed email breach check alice@example.com" in output
+    assert "Exposure records: 1" in output
+    assert "ExampleBreach" in output
+    assert "REKOS never collects passwords" in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-email-breach"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        finding = connection.execute(
+            "SELECT type, value, source, confidence FROM normalized_findings"
+        ).fetchone()
+        entity_counts = dict(
+            connection.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            ).fetchall()
+        )
+
+    assert finding[0] == "breach_exposure"
+    assert "ExampleBreach" in finding[1]
+    assert finding[2:] == ("hibp_breach", "medium")
+    assert entity_counts["email"] == 1
+    assert entity_counts["breach_exposure"] == 1
+
+
 def test_investigate_domain_uses_rdap_it_fallback(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -3035,6 +3254,54 @@ def test_wmn_only_template_hit_is_not_high_by_default(
     assert quality_label(score) in {"low", "medium"}
     assert "exact username match" not in reason
     assert "does not claim identity ownership" in reason
+
+
+def test_investigate_username_preserves_wmn_template_confidence(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("rekos.adapters.sherlock.shutil.which", lambda name: "/usr/bin/sherlock")
+    monkeypatch.setattr("rekos.adapters.sherlock._run_tool", lambda *args: SimpleNamespace(stdout="", stderr=""))
+    monkeypatch.setattr("rekos.adapters.maigret._resolve_maigret_command", lambda: None)
+
+    def fake_wmn_run(self, case: str, target: str) -> str:
+        return json.dumps(
+            {
+                "source": "wmn_username",
+                "target": target,
+                "results": [
+                    {
+                        "platform": "LinkedIn",
+                        "url": f"https://www.linkedin.com/in/{target}/",
+                        "status_code": 200,
+                        "hit": True,
+                        "warning": "LinkedIn HTTP 200 template hit; low confidence unless cross-source confirmed",
+                        "error": "",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(WmnUsernameAdapter, "run", fake_wmn_run)
+
+    assert main(["new-case", "case-wmn-investigate-confidence"]) == 0
+    assert main(["investigate", "username", "case-wmn-investigate-confidence", "alice"]) == 0
+
+    output = capsys.readouterr().out
+    assert "LinkedIn" in output
+    assert "[low, wmn_username" in output
+
+    with sqlite3.connect(tmp_path / "rekos_cases" / "case-wmn-investigate-confidence" / "rekos.db") as connection:
+        confidence, quality_score = connection.execute(
+            """
+            SELECT confidence, quality_score
+            FROM normalized_findings
+            WHERE value = 'https://www.linkedin.com/in/alice'
+            """
+        ).fetchone()
+
+    assert confidence == "low"
+    assert quality_label(quality_score) in {"low", "medium"}
 
 
 def test_sherlock_and_wmn_same_url_boosts_quality(

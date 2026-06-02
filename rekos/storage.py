@@ -63,6 +63,7 @@ ALLOWED_ENTITY_TYPES = {
     "tls_certificate",
     "mail_security",
     "provider",
+    "breach_exposure",
 }
 ALLOWED_RELATIONSHIP_TYPES = {
     "related_to",
@@ -100,6 +101,7 @@ ALLOWED_FINDING_TYPES = {
     "tls_certificate",
     "mail_security",
     "provider_hint",
+    "breach_exposure",
 }
 
 
@@ -2517,6 +2519,43 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
                 findings.append(
                     _FindingInput(
                         finding_type="metadata_record",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+
+        if source == "email_enrichment":
+            if result.platform == "email_username_candidate":
+                findings.append(
+                    _FindingInput(
+                        finding_type="metadata_record",
+                        value=f"Unverified username candidate from email: {result.url}",
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "gravatar_avatar":
+                findings.append(
+                    _FindingInput(
+                        finding_type="discovered_url",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+
+        if source == "hibp_breach":
+            if result.platform == "breach_exposure":
+                findings.append(
+                    _FindingInput(
+                        finding_type="breach_exposure",
                         value=result.url,
                         source=source,
                         confidence=confidence,

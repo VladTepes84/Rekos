@@ -13,7 +13,9 @@ from .sherlock import SherlockUsernameAdapter
 from .web_osint import (
     CrtshDomainAdapter,
     DnsDomainAdapter,
+    EmailEnrichmentAdapter,
     EmailPassiveAdapter,
+    HibpBreachAdapter,
     RdapDomainAdapter,
     WaybackUrlAdapter,
     WebDomainAdapter,
@@ -62,7 +64,9 @@ def default_registry() -> SourceAdapterRegistry:
         [
             CrtshDomainAdapter(),
             DnsDomainAdapter(),
+            EmailEnrichmentAdapter(),
             EmailPassiveAdapter(),
+            HibpBreachAdapter(),
             HttpSnapshotAdapter(),
             MaigretAdapter(),
             RdapDomainAdapter(),
