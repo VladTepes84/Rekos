@@ -418,7 +418,7 @@ def _domain_record_label(finding) -> str:
         return "SPF"
     if finding.finding_type == "certificate_record":
         return "Certificates"
-    if finding.finding_type == "discovered_domain":
+    if finding.finding_type == "discovered_domain" and finding.source != "email_passive":
         return "Subdomains"
     if finding.finding_type in {"web_endpoint", "http_redirect"}:
         return "Web / HTTP"

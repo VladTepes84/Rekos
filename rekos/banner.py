@@ -102,6 +102,7 @@ def _quickstart_table() -> Text:
         ("  rekos new-case my_case\n\n", "bright_green"),
         ("INVESTIGATE\n", "bold magenta"),
         ("  rekos investigate username my_case username\n", "bright_green"),
+        ("  rekos investigate email my_case alice@example.com\n", "bright_green"),
         ("  rekos investigate domain my_case example.com\n\n", "bright_green"),
         ("REVIEW\n", "bold bright_cyan"),
         ("  rekos findings my_case\n", "bright_green"),

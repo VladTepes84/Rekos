@@ -9,7 +9,7 @@ from urllib.parse import urlparse, urlunparse
 
 from .adapters import AdapterResult, BaseSourceAdapter, MaigretAdapter, SherlockUsernameAdapter, WmnUsernameAdapter
 from .adapters.registry import default_registry
-from .adapters.web_osint import normalize_domain
+from .adapters.web_osint import normalize_domain, normalize_email
 from .errors import ExternalToolExecutionError, ExternalToolMissingError, RekosError
 from .osint import _safe_name, _write_export
 from .snapshots import normalize_public_url
@@ -205,6 +205,18 @@ def investigate_url(case: str, url: str, store: CaseStore) -> MultiSourceInvesti
         target=normalized_url,
         sources=("http_snapshot", "wayback_url"),
         entity_type="url",
+        store=store,
+    )
+
+
+def investigate_email(case: str, email: str, store: CaseStore) -> MultiSourceInvestigationResult:
+    normalized_email = normalize_email(email)
+    return _investigate_sources(
+        case=case,
+        target_type="email",
+        target=normalized_email,
+        sources=("email_passive",),
+        entity_type="email",
         store=store,
     )
 

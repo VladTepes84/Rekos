@@ -632,8 +632,8 @@ class CaseStore:
     ) -> SourceInvestigationRecord:
         cleaned_type = target_type.strip().lower()
         cleaned_target = target.strip()
-        if cleaned_type not in {"username", "domain", "url"}:
-            raise ValueError("Source investigation target type must be username, domain, or url.")
+        if cleaned_type not in {"username", "domain", "url", "email"}:
+            raise ValueError("Source investigation target type must be username, domain, url, or email.")
         if not cleaned_target:
             raise ValueError("Source investigation target cannot be empty.")
 
@@ -2456,6 +2456,74 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
                 )
             )
             continue
+
+        if source == "email_passive":
+            if result.platform == "email_domain":
+                findings.append(
+                    _FindingInput(
+                        finding_type="discovered_domain",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "email_target":
+                findings.append(
+                    _FindingInput(
+                        finding_type="metadata_record",
+                        value=f"Email target: {result.url}",
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "mx":
+                findings.append(
+                    _FindingInput(
+                        finding_type="dns_record",
+                        value=result.raw_reference,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform in {"spf", "dmarc"}:
+                findings.append(
+                    _FindingInput(
+                        finding_type="mail_security",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "provider_hint":
+                findings.append(
+                    _FindingInput(
+                        finding_type="provider_hint",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "gravatar_hash":
+                findings.append(
+                    _FindingInput(
+                        finding_type="metadata_record",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
 
         if source == "web_domain":
             finding_type = result.platform

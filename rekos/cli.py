@@ -21,6 +21,7 @@ from .hashfile import sha256_file
 from .investigation import (
     SourceInvestigationFailure,
     investigate_domain,
+    investigate_email,
     investigate_url,
     investigate_username,
 )
@@ -141,6 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     investigate_domain_parser = investigate_subparsers.add_parser("domain", help="Investigate a domain")
     investigate_domain_parser.add_argument("case")
     investigate_domain_parser.add_argument("domain")
+    investigate_email_parser = investigate_subparsers.add_parser("email", help="Investigate an email address")
+    investigate_email_parser.add_argument("case")
+    investigate_email_parser.add_argument("email")
     investigate_url_parser = investigate_subparsers.add_parser("url", help="Investigate a URL")
     investigate_url_parser.add_argument("case")
     investigate_url_parser.add_argument("url")
@@ -370,6 +374,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "investigate" and args.investigation_type == "domain":
             result = investigate_domain(args.case, args.domain, store)
             _print_domain_investigation_summary(args.case, result, store)
+            return 0
+
+        if args.command == "investigate" and args.investigation_type == "email":
+            result = investigate_email(args.case, args.email, store)
+            _print_email_investigation_summary(args.case, result, store)
             return 0
 
         if args.command == "investigate" and args.investigation_type == "url":
@@ -636,6 +645,47 @@ def _print_domain_investigation_summary(case: str, result, store: CaseStore) -> 
         console.print()
         console.print("Key findings:")
         for finding in preview:
+            console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
+    if result.failures:
+        console.print()
+        console.print("Warnings:")
+        for failure in result.failures:
+            console.print(f"- {failure.source}: {failure.error}")
+    console.print()
+    console.print("Next steps:")
+    console.print(f"- rekos findings {case}")
+    console.print(f"- rekos findings {case} --verbose")
+    console.print(f"- rekos graph-summary {case}")
+    console.print(f"- rekos export-case {case} --output {case}.zip")
+
+
+def _print_email_investigation_summary(case: str, result, store: CaseStore) -> None:
+    findings = store.findings(case, refresh_scores=True)
+    email_domain = result.target.split("@", 1)[1] if "@" in result.target else result.target
+    email_findings = [
+        finding
+        for finding in findings
+        if finding.source == "email_passive"
+        or result.target.lower() in finding.value.lower()
+        or result.target.lower() in finding.raw_reference.lower()
+        or email_domain.lower() in finding.value.lower()
+        or email_domain.lower() in finding.raw_reference.lower()
+    ]
+    console.print(f"[green]Completed email investigation[/green] {result.target}")
+    console.print(f"Records discovered: {result.results}")
+    breakdown = _email_record_breakdown(email_findings)
+    if breakdown:
+        console.print()
+        console.print("Record breakdown:")
+        for label in ("MX", "SPF", "DMARC", "Provider hints", "Gravatar hash"):
+            value = breakdown.get(label)
+            if value:
+                console.print(f"- {label:<14} {value}", markup=False)
+    preview = _key_findings(email_findings)
+    if preview:
+        console.print()
+        console.print("Key findings:")
+        for finding in preview[:6]:
             console.print(f"- {_finding_summary_label(finding):<14} {_preview_value(finding.value)}", markup=False)
     if result.failures:
         console.print()
@@ -1145,6 +1195,36 @@ def _domain_record_breakdown(findings) -> dict[str, int]:
     return counts
 
 
+def _email_record_breakdown(findings) -> dict[str, str]:
+    counts = _domain_record_breakdown(findings)
+    providers = _provider_names(findings)
+    breakdown: dict[str, str] = {}
+    for label in ("MX", "SPF", "DMARC"):
+        count = counts.get(label, 0)
+        if count:
+            breakdown[label] = str(count)
+    if providers:
+        breakdown["Provider hints"] = ", ".join(providers)
+    if any(
+        finding.finding_type == "metadata_record"
+        and finding.value.startswith("Gravatar MD5 ")
+        for finding in findings
+    ):
+        breakdown["Gravatar hash"] = "local only"
+    return breakdown
+
+
+def _provider_names(findings) -> list[str]:
+    providers: list[str] = []
+    for finding in findings:
+        if finding.finding_type != "provider_hint":
+            continue
+        provider = finding.value.split(" provider hint", 1)[0].removeprefix("heuristic indicator: ").strip()
+        if provider and provider not in providers:
+            providers.append(provider)
+    return providers
+
+
 def _print_domain_records(findings, *, verbose: bool) -> None:
     sections = [
         ("A", "A records"),
@@ -1206,7 +1286,7 @@ def _domain_record_label(finding) -> str:
         return "SPF"
     if finding.finding_type == "certificate_record":
         return "Certificates"
-    if finding.finding_type == "discovered_domain":
+    if finding.finding_type == "discovered_domain" and finding.source != "email_passive":
         return "Subdomains"
     if finding.finding_type in {"web_endpoint", "http_redirect"}:
         return "Web / HTTP"

@@ -148,6 +148,7 @@ The project intentionally avoids:
 ```bash
 rekos new-case social_test
 rekos investigate username social_test username
+rekos investigate email social_test alice@example.com
 rekos findings social_test
 rekos findings social_test --verbose
 rekos score social_test
@@ -158,7 +159,7 @@ rekos export-case social_test --output social_test.zip
 Normal workflow:
 
 1. Create a case with `rekos new-case`.
-2. Add or investigate a target with `rekos investigate username`, `rekos investigate domain`, or `rekos snapshot-url`.
+2. Add or investigate a target with `rekos investigate username`, `rekos investigate email`, `rekos investigate domain`, or `rekos snapshot-url`.
 3. Review normalized results with `rekos findings`.
 4. Score correlation quality with `rekos score`.
 5. Inspect relationships with `rekos graph-summary` or `rekos list-entities`.
@@ -170,6 +171,7 @@ Most users only need these commands:
 rekos
 rekos new-case acme-osint
 rekos investigate username acme-osint alice.example
+rekos investigate email acme-osint alice@example.com
 rekos investigate domain acme-osint example.com
 rekos snapshot-url acme-osint https://example.com/profile/alice
 rekos findings acme-osint
@@ -187,6 +189,8 @@ Users run only `rekos`. Sherlock and Maigret are optional integrations that REKO
 During `rekos investigate username <case> <username>`, REKOS generates safe username variants, runs available passive username sources, stores raw source output, normalizes discovered profile URLs into findings, updates the entity graph, records timeline events, and computes correlation-quality scores. Results are correlation indicators, not proof of identity ownership.
 
 During `rekos investigate domain <case> <domain>`, REKOS runs passive DNS, RDAP with registry/WHOIS fallback, HTTP/HTTPS endpoint checks, TLS certificate metadata collection, and crt.sh certificate transparency lookup when available. It records registration evidence, DNS records, web endpoint metadata, redirects, TLS certificate summaries, SPF/mail-security summaries, provider hints from TXT records, and certificate transparency findings.
+
+During `rekos investigate email <case> <email>`, REKOS validates and normalizes the address, extracts the domain, checks passive public DNS MX/SPF/DMARC records, records provider hints, and stores a local Gravatar MD5 hash without checking account existence.
 
 Domain, URL, and snapshot workflows reject localhost, private/internal IP ranges, link-local addresses, metadata-service IPs, reserved, multicast, and unspecified IP targets. REKOS is for public-source targets only.
 
@@ -247,6 +251,7 @@ REKOS does not use:
 | `sherlock_username` | `username`      | `sherlock` binary                | Runs Sherlock with safe subprocess arguments and parses public profile URLs.     |
 | `maigret_username`  | `username`      | optional `maigret` package/tool  | Runs Maigret when installed; REKOS continues without it.                        |
 | `wmn_username`      | `username`      | none                             | Checks local public profile URL templates with conservative passive HTTP validation. |
+| `email_passive`     | `email`         | none                             | Checks passive public MX/SPF/DMARC records and local email metadata only.        |
 | `http_snapshot`     | `url`           | none                             | Captures public HTTP response artifacts and optional Playwright screenshot.      |
 | `rdap_domain`       | `domain`        | none                             | Uses public HTTPS RDAP lookup with registry and WHOIS fallback where available.  |
 | `dns_domain`        | `domain`        | none                             | Fetches public DNS A/AAAA/MX/NS/TXT records and extracts SPF/provider hints.     |
@@ -282,6 +287,7 @@ REKOS must not be used for:
 - Logging into accounts or automating authenticated sessions
 - Bypassing access controls, paywalls, CAPTCHAs, bot protection, or rate limits
 - Credential collection, phishing, account abuse, or social engineering
+- SMTP probing, password reset checks, breach checks, or account existence claims
 - Exploitation, destructive operations, or aggressive crawling
 - Claiming identity ownership from correlation results
 

@@ -242,6 +242,7 @@ def test_quickstart_command_outputs_onboarding(capsys) -> None:
     assert "2. " not in output
     assert "rekos new-case my_case" in output
     assert "rekos investigate username my_case username" in output
+    assert "rekos investigate email my_case alice@example.com" in output
     assert "rekos investigate domain my_case example.com" in output
     assert "rekos findings my_case" in output
     assert "rekos findings my_case --verbose" in output
@@ -355,6 +356,7 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sorted(sources) == [
         "crtsh_domain",
         "dns_domain",
+        "email_passive",
         "http_snapshot",
         "maigret_username",
         "rdap_domain",
@@ -373,6 +375,8 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["http_snapshot"].external_dependencies == ()
     assert sources["dns_domain"].supported_target_types == ("domain",)
     assert sources["dns_domain"].external_dependencies == ()
+    assert sources["email_passive"].supported_target_types == ("email",)
+    assert sources["email_passive"].external_dependencies == ()
     assert sources["rdap_domain"].supported_target_types == ("domain",)
     assert sources["web_domain"].supported_target_types == ("domain",)
     assert sources["web_domain"].external_dependencies == ()
@@ -2325,6 +2329,121 @@ def test_investigate_domain_runs_rdap_and_dns_foundation(
     assert main(["findings", "case-domain-foundation", "--verbose", "--show-uuids"]) == 0
     verbose_uuid_output = capsys.readouterr().out
     assert dns_finding_id in verbose_uuid_output
+
+
+def test_investigate_email_passive_records_dns_and_graph(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dns_payloads = {
+        ("example.com", "MX"): {
+            "Status": 0,
+            "Answer": [{"type": 15, "data": "10 mail.protection.outlook.com."}],
+        },
+        ("example.com", "TXT"): {
+            "Status": 0,
+            "Answer": [{"type": 16, "data": '"v=spf1 include:spf.protection.outlook.com -all"'}],
+        },
+        ("_dmarc.example.com", "TXT"): {
+            "Status": 0,
+            "Answer": [{"type": 16, "data": '"v=DMARC1; p=reject; rua=mailto:dmarc@example.com"'}],
+        },
+    }
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        for (name, record_type), payload in dns_payloads.items():
+            if request.full_url == f"https://dns.google/resolve?name={name}&type={record_type}":
+                return FakeHttpResponse(200, json.dumps(payload).encode("utf-8"))
+        raise AssertionError(f"unexpected URL: {request.full_url}")
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
+    assert main(["new-case", "case-email-foundation"]) == 0
+    assert main(["investigate", "email", "case-email-foundation", "Alice@Example.COM"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Completed email investigation" in output
+    assert "alice@example.com" in output
+    assert "Records discovered: 7" in output
+    assert "Record breakdown:" in output
+    assert "- MX             1" in output
+    assert "- SPF            1" in output
+    assert "- DMARC          1" in output
+    assert "- Provider hints Microsoft 365" in output
+    assert "- Gravatar hash  local only" in output
+    assert "Key findings:" in output
+    assert "Microsoft 365" in output
+    assert "rekos findings case-email-foundation" in output
+
+    case_folder = tmp_path / "rekos_cases" / "case-email-foundation"
+    with sqlite3.connect(case_folder / "rekos.db") as connection:
+        entity_counts = dict(
+            connection.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            ).fetchall()
+        )
+        source_summary = connection.execute(
+            "SELECT target_type, target, source_count, result_count, skipped_count, failed_count FROM source_investigations"
+        ).fetchone()
+        finding_rows = connection.execute(
+            """
+            SELECT type, value, source, confidence
+            FROM normalized_findings
+            ORDER BY type, value
+            """
+        ).fetchall()
+        relationship_rows = connection.execute(
+            """
+            SELECT source.entity_type, source.value, target.entity_type, target.value, relationship_type
+            FROM relationships
+            JOIN entities source ON source.entity_id = relationships.source_entity_id
+            JOIN entities target ON target.entity_id = relationships.target_entity_id
+            ORDER BY source.value, target.value
+            """
+        ).fetchall()
+
+    assert entity_counts["email"] == 1
+    assert entity_counts["domain"] == 1
+    assert entity_counts["mx"] == 1
+    assert entity_counts["mail_security"] == 2
+    assert entity_counts["provider"] == 1
+    assert "note" not in entity_counts
+    assert source_summary == ("email", "alice@example.com", 1, 7, 0, 0)
+    assert ("metadata_record", "Email target: alice@example.com", "email_passive", "high") in finding_rows
+    assert ("discovered_domain", "example.com", "email_passive", "high") in finding_rows
+    assert ("dns_record", "MX example.com -> mail.protection.outlook.com", "email_passive", "high") in finding_rows
+    assert any(row[0] == "mail_security" and row[1].startswith("SPF example.com") for row in finding_rows)
+    assert any(row[0] == "mail_security" and row[1].startswith("DMARC example.com") for row in finding_rows)
+    provider_rows = [row for row in finding_rows if row[0] == "provider_hint"]
+    assert len(provider_rows) == 1
+    assert "Microsoft 365 provider hint" in provider_rows[0][1]
+    assert any(row[0] == "metadata_record" and row[1].startswith("Gravatar MD5 alice@example.com:") for row in finding_rows)
+    assert ("email", "alice@example.com", "domain", "example.com", "related_to") in relationship_rows
+
+    assert main(["findings", "case-email-foundation"]) == 0
+    findings_output = capsys.readouterr().out
+    assert "email: alice@example.com" in findings_output
+    assert "SPF example.com" in findings_output
+    assert "DMARC example.com" in findings_output
+
+    assert main(["graph-summary", "case-email-foundation"]) == 0
+    graph_output = capsys.readouterr().out
+    assert "email" in graph_output
+    assert "domain" in graph_output
+    assert "Graph overview" in graph_output
+
+
+def test_investigate_email_rejects_invalid_email(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert main(["new-case", "case-email-invalid"]) == 0
+    assert main(["investigate", "email", "case-email-invalid", "not-an-email"]) == 1
+
+    output = capsys.readouterr().err
+    assert "Invalid email address" in output
 
 
 def test_investigate_domain_uses_rdap_it_fallback(

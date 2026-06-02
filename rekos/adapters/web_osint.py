@@ -6,6 +6,7 @@ import json
 import re
 import socket
 import ssl
+from hashlib import md5
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
@@ -33,6 +34,7 @@ DOMAIN_RE = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
     re.IGNORECASE,
 )
+EMAIL_RE = re.compile(r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", re.IGNORECASE)
 URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 PROVIDER_HINTS = {
@@ -278,6 +280,203 @@ class DnsDomainAdapter(BaseSourceAdapter):
                 )
                 if record_type == "TXT":
                     results.extend(_txt_enrichment_results(domain, value))
+        return results
+
+
+class EmailPassiveAdapter(BaseSourceAdapter):
+    name = "email_passive"
+    description = "Extract email domain signals with passive DNS and local metadata."
+    supported_target_types = ("email",)
+    passive_only = True
+    external_dependencies: tuple[str, ...] = ()
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        email = normalize_email(target)
+        raw_output = self.run(case, email)
+        artifact_path = self._write_source_output(case, email, store, raw_output)
+        results = self.parse_results(email, raw_output)
+        store.add_adapter_results(case, results)
+
+        local_part, domain = email.split("@", 1)
+        email_entity = store.ensure_entity(case, "email", email, "Email investigation target")
+        domain_entity = store.ensure_entity(case, "domain", domain, "Domain extracted from email")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
+        store.relate_entities(
+            case,
+            email_entity.entity_id,
+            domain_entity.entity_id,
+            "related_to",
+            "high",
+            "Domain extracted from email address",
+        )
+        for result in results:
+            if result.platform == "gravatar_hash":
+                continue
+            entity_type = _email_entity_type(result.platform)
+            if result.platform == "email_target":
+                entity = email_entity
+            elif result.platform == "email_domain":
+                entity = domain_entity
+            else:
+                entity = store.ensure_entity(
+                    case,
+                    entity_type,
+                    result.url,
+                    f"Email passive {result.platform} observation",
+                )
+            if entity.entity_id != domain_entity.entity_id and result.platform not in {"email_target", "gravatar_hash"}:
+                store.relate_entities(
+                    case,
+                    domain_entity.entity_id,
+                    entity.entity_id,
+                    "related_to",
+                    result.confidence,
+                    f"Email domain {result.platform} observation",
+                )
+            if entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "Email passive source produced observation",
+                )
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {email}")
+        store.add_timeline_event(case, "investigation.email", f"Investigated email domain for {local_part}@{domain}")
+        return SourceRunResult(
+            source=self.name,
+            target=email,
+            raw_output=raw_output,
+            results=results,
+            artifacts=[artifact_path],
+        )
+
+    def run(self, case: str, target: str) -> str:
+        email = normalize_email(target)
+        local_part, domain = email.split("@", 1)
+        queries: list[dict[str, Any]] = []
+        for query_name, record_type in ((domain, "MX"), (domain, "TXT"), (f"_dmarc.{domain}", "TXT")):
+            query = urlencode({"name": query_name, "type": record_type})
+            try:
+                response = _load_json(fetch_public_text(f"https://dns.google/resolve?{query}"))
+                queries.append({"name": query_name, "type": record_type, "response": response})
+            except ExternalToolExecutionError as exc:
+                queries.append({"name": query_name, "type": record_type, "error": str(exc)})
+        return json.dumps(
+            {
+                "source": self.name,
+                "target": email,
+                "local_part": local_part,
+                "domain": domain,
+                "gravatar_md5": md5(email.encode("utf-8"), usedforsecurity=False).hexdigest(),
+                "queries": queries,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
+        email = normalize_email(target)
+        parsed = _load_json(raw_output)
+        if not isinstance(parsed, dict):
+            return []
+        domain = normalize_domain(str(parsed.get("domain") or email.split("@", 1)[1]))
+        gravatar_hash = str(parsed.get("gravatar_md5") or "")
+        results = [
+            AdapterResult(
+                source=self.name,
+                target=email,
+                url=email,
+                platform="email_target",
+                confidence="high",
+                raw_reference=f"Email target {email}",
+            ),
+            AdapterResult(
+                source=self.name,
+                target=email,
+                url=domain,
+                platform="email_domain",
+                confidence="high",
+                raw_reference=f"Email domain {domain}",
+            ),
+        ]
+        if re.fullmatch(r"[a-f0-9]{32}", gravatar_hash):
+            results.append(
+                AdapterResult(
+                    source=self.name,
+                    target=email,
+                    url=f"Gravatar MD5 {email}: {gravatar_hash}",
+                    platform="gravatar_hash",
+                    confidence="low",
+                    raw_reference=f"Local Gravatar MD5 hash for {email}: {gravatar_hash}",
+                )
+            )
+
+        seen: set[tuple[str, str]] = set()
+        provider_evidence: dict[str, list[str]] = {}
+        queries = parsed.get("queries", [])
+        if not isinstance(queries, list):
+            return results
+        for query in queries:
+            if not isinstance(query, dict):
+                continue
+            query_name = str(query.get("name") or "")
+            record_type = str(query.get("type") or "").upper()
+            response = query.get("response")
+            if record_type not in {"MX", "TXT"} or not isinstance(response, dict):
+                continue
+            answers = response.get("Answer", [])
+            if not isinstance(answers, list):
+                continue
+            for answer in answers:
+                if not isinstance(answer, dict):
+                    continue
+                if answer.get("type") != DNS_QUERY_TYPES[record_type]:
+                    continue
+                value = _normalize_dns_value(record_type, str(answer.get("data") or ""))
+                if not value or (query_name, record_type, value) in seen:
+                    continue
+                seen.add((query_name, record_type, value))
+                if record_type == "MX":
+                    results.append(
+                        AdapterResult(
+                            source=self.name,
+                            target=email,
+                            url=value,
+                            platform="mx",
+                            confidence="high",
+                            raw_reference=f"MX {domain} -> {value}",
+                        )
+                    )
+                    _record_provider_evidence(provider_evidence, value)
+                    continue
+                lowered = value.lower()
+                if query_name.lower().startswith("_dmarc.") and "v=dmarc1" in lowered:
+                    results.append(
+                        AdapterResult(
+                            source=self.name,
+                            target=email,
+                            url=f"DMARC {domain}: {_dmarc_summary(value)}",
+                            platform="dmarc",
+                            confidence="medium",
+                            raw_reference=f"DMARC {query_name} -> {value}",
+                        )
+                    )
+                    continue
+                if query_name.lower() == domain and lowered.startswith("v=spf1"):
+                    results.append(
+                        AdapterResult(
+                            source=self.name,
+                            target=email,
+                            url=f"SPF {domain}: {_spf_summary(value)}",
+                            platform="spf",
+                            confidence="medium",
+                            raw_reference=f"SPF {domain} -> {value}",
+                        )
+                    )
+                    _record_provider_evidence(provider_evidence, value)
+        results.extend(_provider_hint_results(self.name, email, provider_evidence))
         return results
 
 
@@ -752,6 +951,45 @@ def _txt_enrichment_results(domain: str, value: str) -> list[AdapterResult]:
     return results
 
 
+def _provider_hint_results(source: str, target: str, value: str | dict[str, list[str]]) -> list[AdapterResult]:
+    if isinstance(value, dict):
+        return [
+            AdapterResult(
+                source=source,
+                target=target,
+                url=f"{provider.title()} provider hint",
+                platform="provider_hint",
+                confidence="low",
+                raw_reference=f"Provider hint {provider}: {', '.join(evidence)}",
+            )
+            for provider, evidence in sorted(value.items())
+        ]
+    lowered = value.lower()
+    results: list[AdapterResult] = []
+    for provider, markers in PROVIDER_HINTS.items():
+        if any(marker in lowered for marker in markers):
+            results.append(
+                AdapterResult(
+                    source=source,
+                    target=target,
+                    url=f"{provider.title()} provider hint: {value}",
+                    platform="provider_hint",
+                    confidence="low",
+                    raw_reference=f"Provider hint {provider}: {value}",
+                )
+            )
+    return results
+
+
+def _record_provider_evidence(evidence: dict[str, list[str]], value: str) -> None:
+    lowered = value.lower()
+    for provider, markers in PROVIDER_HINTS.items():
+        if any(marker in lowered for marker in markers):
+            entries = evidence.setdefault(provider, [])
+            if value not in entries:
+                entries.append(value)
+
+
 def _spf_summary(value: str) -> str:
     mechanisms = value.split()
     includes = [item.removeprefix("include:") for item in mechanisms if item.startswith("include:")]
@@ -762,6 +1000,18 @@ def _spf_summary(value: str) -> str:
     if policy:
         parts.append(f"policy={policy}")
     return "; ".join(parts) or value
+
+
+def _dmarc_summary(value: str) -> str:
+    parts = [part.strip() for part in value.split(";") if part.strip()]
+    policy = next((part for part in parts if part.lower().startswith("p=")), "")
+    rua = next((part for part in parts if part.lower().startswith("rua=")), "")
+    summary_parts = []
+    if policy:
+        summary_parts.append(policy)
+    if rua:
+        summary_parts.append(rua)
+    return "; ".join(summary_parts) or value
 
 
 def _load_json(raw_output: str) -> Any:
@@ -843,6 +1093,21 @@ def _dns_entity_type(record_type: str) -> str:
     return "note"
 
 
+def _email_entity_type(platform: str) -> str:
+    normalized = platform.strip().lower()
+    if normalized == "email_target":
+        return "email"
+    if normalized == "email_domain":
+        return "domain"
+    if normalized == "mx":
+        return "mx"
+    if normalized in {"spf", "dmarc"}:
+        return "mail_security"
+    if normalized == "provider_hint":
+        return "provider"
+    return "note"
+
+
 def _web_entity_type(platform: str) -> str:
     normalized = platform.strip().lower()
     if normalized in {"web_endpoint", "http_redirect", "tls_certificate"}:
@@ -861,6 +1126,16 @@ def _normalize_dns_value(record_type: str, value: str) -> str:
     if record_type == "TXT":
         cleaned = cleaned.strip('"')
     return cleaned
+
+
+def normalize_email(value: str) -> str:
+    email = value.strip().lower()
+    if not EMAIL_RE.fullmatch(email):
+        raise ValueError(f"Invalid email address: {value}")
+    local_part, domain = email.rsplit("@", 1)
+    if local_part.startswith(".") or local_part.endswith(".") or ".." in local_part:
+        raise ValueError(f"Invalid email address: {value}")
+    return f"{local_part}@{normalize_domain(domain)}"
 
 
 def _rdap_url(domain: str) -> str:
