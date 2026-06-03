@@ -368,6 +368,7 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
         "wayback_url",
         "web_domain",
         "wmn_username",
+        "xposedornot_breach",
     ]
     assert sources["sherlock_username"].supported_target_types == ("username",)
     assert sources["sherlock_username"].external_dependencies == ("sherlock",)
@@ -385,6 +386,8 @@ def test_source_adapter_registry_contains_initial_sources() -> None:
     assert sources["email_enrichment"].external_dependencies == ()
     assert sources["hibp_breach"].supported_target_types == ("email",)
     assert sources["hibp_breach"].external_dependencies == ()
+    assert sources["xposedornot_breach"].supported_target_types == ("email",)
+    assert sources["xposedornot_breach"].external_dependencies == ()
     assert sources["rdap_domain"].supported_target_types == ("domain",)
     assert sources["web_domain"].supported_target_types == ("domain",)
     assert sources["web_domain"].external_dependencies == ()
@@ -2591,24 +2594,48 @@ def test_check_breach_skips_without_api_key(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("REKOS_HIBP_API_KEY", raising=False)
 
+    def fake_urlopen(request, timeout):
+        assert timeout == 15
+        assert request.full_url == "https://api.xposedornot.com/v1/check-email/alice%40example.com"
+        return FakeHttpResponse(
+            200,
+            json.dumps({"Error": "Not found"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
+
     assert main(["new-case", "case-email-breach-missing-key"]) == 0
     assert main(["check-breach", "case-email-breach-missing-key", "alice@example.com"]) == 0
 
     output = capsys.readouterr().out
     assert "Completed email breach check alice@example.com" in output
+    assert "Exposure status: not breached" in output
     assert "Exposure records: 0" in output
+    assert "xposedornot_breach: ok (not breached)" in output
     assert "REKOS_HIBP_API_KEY" in output
 
     case_folder = tmp_path / "rekos_cases" / "case-email-breach-missing-key"
     with sqlite3.connect(case_folder / "rekos.db") as connection:
-        source_run = connection.execute(
-            "SELECT source, status, result_count, error FROM source_runs"
+        source_runs = {
+            row[0]: row[1:]
+            for row in connection.execute(
+                "SELECT source, status, result_count, error FROM source_runs"
+            ).fetchall()
+        }
+        finding = connection.execute(
+            "SELECT type, value, source, confidence FROM normalized_findings"
         ).fetchone()
-        findings_count = connection.execute("SELECT COUNT(*) FROM normalized_findings").fetchone()[0]
 
-    assert source_run[0:3] == ("hibp_breach", "skipped", 0)
-    assert "REKOS_HIBP_API_KEY" in source_run[3]
-    assert findings_count == 0
+    assert source_runs["xposedornot_breach"][0:2] == ("ok", 1)
+    assert source_runs["hibp_breach"][0:2] == ("skipped", 0)
+    assert "REKOS_HIBP_API_KEY" in source_runs["hibp_breach"][2]
+    assert finding == (
+        "metadata_record",
+        "XposedOrNot breach status: no breach exposure reported for alice@example.com",
+        "xposedornot_breach",
+        "medium",
+    )
 
 
 def test_check_breach_records_hibp_exposure(
@@ -2619,22 +2646,29 @@ def test_check_breach_records_hibp_exposure(
 
     def fake_urlopen(request, timeout):
         assert timeout == 15
-        assert request.full_url.startswith("https://haveibeenpwned.com/api/v3/breachedaccount/alice%40example.com")
-        assert request.headers["Hibp-api-key"] == "test-key"
-        return FakeHttpResponse(
-            200,
-            json.dumps(
-                [
-                    {
-                        "Name": "ExampleBreach",
-                        "Title": "Example Breach",
-                        "BreachDate": "2025-01-01",
-                        "DataClasses": ["Email addresses", "Usernames"],
-                    }
-                ]
-            ).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
+        if request.full_url == "https://api.xposedornot.com/v1/check-email/alice%40example.com":
+            return FakeHttpResponse(
+                200,
+                json.dumps({"breaches": [["ExampleBreach"]]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+        if request.full_url.startswith("https://haveibeenpwned.com/api/v3/breachedaccount/alice%40example.com"):
+            assert request.headers["Hibp-api-key"] == "test-key"
+            return FakeHttpResponse(
+                200,
+                json.dumps(
+                    [
+                        {
+                            "Name": "ExampleBreach",
+                            "Title": "Example Breach",
+                            "BreachDate": "2025-01-01",
+                            "DataClasses": ["Email addresses", "Usernames"],
+                        }
+                    ]
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+        raise AssertionError(f"unexpected URL: {request.full_url}")
 
     monkeypatch.setattr("rekos.adapters.web_osint.urlopen", fake_urlopen)
 
@@ -2643,26 +2677,37 @@ def test_check_breach_records_hibp_exposure(
 
     output = capsys.readouterr().out
     assert "Completed email breach check alice@example.com" in output
-    assert "Exposure records: 1" in output
+    assert "Exposure status: breached" in output
+    assert "Exposure records: 2" in output
+    assert "xposedornot_breach: ok (breached)" in output
     assert "ExampleBreach" in output
     assert "REKOS never collects passwords" in output
 
     case_folder = tmp_path / "rekos_cases" / "case-email-breach"
     with sqlite3.connect(case_folder / "rekos.db") as connection:
-        finding = connection.execute(
+        findings = connection.execute(
             "SELECT type, value, source, confidence FROM normalized_findings"
-        ).fetchone()
+        ).fetchall()
         entity_counts = dict(
             connection.execute(
                 "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
             ).fetchall()
         )
 
-    assert finding[0] == "breach_exposure"
-    assert "ExampleBreach" in finding[1]
-    assert finding[2:] == ("hibp_breach", "medium")
+    assert (
+        "breach_exposure",
+        "XposedOrNot breach exposure: ExampleBreach",
+        "xposedornot_breach",
+        "medium",
+    ) in findings
+    assert any(
+        row[0] == "breach_exposure"
+        and "ExampleBreach" in row[1]
+        and row[2:] == ("hibp_breach", "medium")
+        for row in findings
+    )
     assert entity_counts["email"] == 1
-    assert entity_counts["breach_exposure"] == 1
+    assert entity_counts["breach_exposure"] == 2
 
 
 def test_investigate_domain_uses_rdap_it_fallback(

@@ -776,10 +776,33 @@ def _print_email_breach_summary(case: str, result, store: CaseStore) -> None:
     breach_findings = [
         finding
         for finding in findings
-        if finding.source == "hibp_breach"
+        if finding.finding_type == "breach_exposure"
+        and finding.source in {"xposedornot_breach", "hibp_breach"}
     ]
+    no_exposure_findings = [
+        finding
+        for finding in findings
+        if finding.source == "xposedornot_breach"
+        and finding.finding_type == "metadata_record"
+        and "no breach exposure reported" in finding.value.lower()
+    ]
+    xposedornot_status = _source_run_status(store, case, "xposedornot_breach")
+    hibp_status = _source_run_status(store, case, "hibp_breach")
+    exposure_status = "unknown"
+    if breach_findings:
+        exposure_status = "breached"
+    elif no_exposure_findings:
+        exposure_status = "not breached"
     console.print(f"[green]Completed email breach check[/green] {result.target}")
-    console.print(f"Exposure records: {result.results}")
+    console.print(f"Exposure status: {exposure_status}")
+    console.print(f"Exposure records: {len(breach_findings)}")
+    console.print()
+    console.print("Sources:")
+    if xposedornot_status:
+        note = "not breached" if no_exposure_findings else ("breached" if breach_findings else "")
+        console.print(f"- xposedornot_breach: {_source_status_line(xposedornot_status, note)}")
+    if hibp_status:
+        console.print(f"- hibp_breach: {_source_status_line(hibp_status)}")
     if breach_findings:
         console.print()
         console.print("Exposure summary:")
@@ -801,6 +824,22 @@ def _print_email_breach_summary(case: str, result, store: CaseStore) -> None:
     console.print(f"- rekos findings {case}")
     console.print(f"- rekos findings {case} --verbose")
     console.print(f"- rekos graph-summary {case}")
+
+
+def _source_run_status(store: CaseStore, case: str, source: str):
+    for run in reversed(store.source_runs(case)):
+        if run.source == source:
+            return run
+    return None
+
+
+def _source_status_line(run, note: str = "") -> str:
+    line = run.status
+    if note:
+        line = f"{line} ({note})"
+    if run.error:
+        line = f"{line} - {run.error}"
+    return line
 
 
 def _sorted_profiles(profiles) -> list:

@@ -196,7 +196,7 @@ During `rekos investigate domain <case> <domain>`, REKOS runs passive DNS, RDAP 
 
 During `rekos investigate email <case> <email>`, REKOS validates and normalizes the address, extracts the domain, checks passive public DNS MX/SPF/DMARC records, records provider hints, and stores a local Gravatar MD5 hash without checking account existence.
 
-Use `rekos enrich email <case> <email>` for optional passive enrichment such as unverified username candidates derived from the local-part and public Gravatar avatar metadata. Use `rekos check-breach <case> <email>` only when `REKOS_HIBP_API_KEY` is configured; it records breach exposure metadata from Have I Been Pwned without collecting passwords or credential material.
+Use `rekos enrich email <case> <email>` for optional passive enrichment such as unverified username candidates derived from the local-part and public Gravatar avatar metadata. Use `rekos check-breach <case> <email>` for passive breach exposure status: REKOS checks XposedOrNot without an API key and can additionally query Have I Been Pwned when `REKOS_HIBP_API_KEY` is configured. It records exposure metadata only and does not collect passwords or credential material.
 
 Domain, URL, and snapshot workflows reject localhost, private/internal IP ranges, link-local addresses, metadata-service IPs, reserved, multicast, and unspecified IP targets. REKOS is for public-source targets only.
 
@@ -250,7 +250,7 @@ REKOS does not use:
 - account automation
 - active exploitation techniques
 
-Optional breach exposure checks use legitimate public APIs such as Have I Been Pwned when the user provides an API key. REKOS records exposure metadata only and does not collect passwords, credential material, or account ownership claims.
+Optional breach exposure checks use legitimate public APIs such as XposedOrNot and Have I Been Pwned. XposedOrNot provides the default free breached/not-breached status; HIBP is used only when the user provides an API key. REKOS records exposure metadata only and does not collect passwords, credential material, or account ownership claims.
 
 ## Supported Sources
 
@@ -261,6 +261,7 @@ Optional breach exposure checks use legitimate public APIs such as Have I Been P
 | `wmn_username`      | `username`      | none                             | Checks local public profile URL templates, including LinkedIn, with conservative passive HTTP validation. |
 | `email_passive`     | `email`         | none                             | Checks passive public MX/SPF/DMARC records and local email metadata only.        |
 | `email_enrichment`  | `email`         | none                             | Derives unverified username candidates and checks public Gravatar avatar metadata. |
+| `xposedornot_breach` | `email`        | none                             | Checks free XposedOrNot breached/not-breached status; no passwords or credential material. |
 | `hibp_breach`       | `email`         | `REKOS_HIBP_API_KEY` env var     | Optional Have I Been Pwned breach exposure check; no passwords or credential material. |
 | `http_snapshot`     | `url`           | none                             | Captures public HTTP response artifacts and optional Playwright screenshot.      |
 | `rdap_domain`       | `domain`        | none                             | Uses public HTTPS RDAP lookup with registry and WHOIS fallback where available.  |

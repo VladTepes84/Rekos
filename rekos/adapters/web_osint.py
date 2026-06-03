@@ -744,6 +744,149 @@ class HibpBreachAdapter(BaseSourceAdapter):
         return results
 
 
+class XposedOrNotBreachAdapter(BaseSourceAdapter):
+    name = "xposedornot_breach"
+    description = "Check XposedOrNot public breach exposure status without an API key."
+    supported_target_types = ("email",)
+    passive_only = True
+    external_dependencies: tuple[str, ...] = ()
+
+    def execute(self, case: str, target: str, store) -> SourceRunResult:
+        email = normalize_email(target)
+        raw_output = self.run(case, email)
+        artifact_path = self._write_source_output(case, email, store, raw_output)
+        results = self.parse_results(email, raw_output)
+        store.add_adapter_results(case, results)
+
+        email_entity = store.ensure_entity(case, "email", email, "Email breach check target")
+        source_entity = store.ensure_entity(case, "source", self.name, "source adapter")
+        for result in results:
+            entity_type = "breach_exposure" if result.platform == "breach_exposure" else "note"
+            entity = store.ensure_entity(case, entity_type, result.url, "XposedOrNot breach status result")
+            if entity.entity_id != email_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    email_entity.entity_id,
+                    entity.entity_id,
+                    "related_to",
+                    result.confidence,
+                    "Breach status reported by XposedOrNot",
+                )
+            if entity.entity_id != source_entity.entity_id:
+                store.relate_entities(
+                    case,
+                    source_entity.entity_id,
+                    entity.entity_id,
+                    "produced",
+                    result.confidence,
+                    "XposedOrNot source produced breach status",
+                )
+        store.add_timeline_event(case, "source.run", f"Ran source {self.name} for {email}")
+        return SourceRunResult(
+            source=self.name,
+            target=email,
+            raw_output=raw_output,
+            results=results,
+            artifacts=[artifact_path],
+        )
+
+    def run(self, case: str, target: str) -> str:
+        email = normalize_email(target)
+        url = f"https://api.xposedornot.com/v1/check-email/{quote(email, safe='')}"
+        request = Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
+        try:
+            with urlopen(request, timeout=SOURCE_TIMEOUT_SECONDS) as response:
+                body = response.read(MAX_SOURCE_BYTES)
+                status = int(getattr(response, "status", 0) or getattr(response, "getcode", lambda: 0)())
+        except HTTPError as exc:
+            if exc.code == 404:
+                return json.dumps(
+                    {
+                        "source": self.name,
+                        "target": email,
+                        "status": 404,
+                        "breached": False,
+                        "breaches": [],
+                        "message": "not found",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            raise ExternalToolExecutionError(
+                f"XposedOrNot request failed for {email}: HTTP {exc.code}"
+            ) from exc
+        except (OSError, TimeoutError, URLError) as exc:
+            raise ExternalToolExecutionError(f"XposedOrNot request failed for {email}: {exc}") from exc
+
+        parsed = _load_json(body.decode("utf-8", errors="replace"))
+        breaches = _xposedornot_breach_names(parsed)
+        breached = bool(breaches)
+        if isinstance(parsed, dict) and _xposedornot_is_not_found(parsed):
+            breached = False
+            breaches = []
+        return json.dumps(
+            {
+                "source": self.name,
+                "target": email,
+                "status": status,
+                "breached": breached,
+                "breaches": breaches,
+                "response": parsed,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
+        email = normalize_email(target)
+        parsed = _load_json(raw_output)
+        if not isinstance(parsed, dict):
+            return []
+        breaches = parsed.get("breaches", [])
+        breached = bool(parsed.get("breached"))
+        if not isinstance(breaches, list):
+            breaches = []
+        if not breached:
+            return [
+                AdapterResult(
+                    source=self.name,
+                    target=email,
+                    url=f"XposedOrNot breach status: no breach exposure reported for {email}",
+                    platform="breach_status",
+                    confidence="medium",
+                    raw_reference=json.dumps(parsed, sort_keys=True),
+                )
+            ]
+
+        results: list[AdapterResult] = []
+        for breach in breaches:
+            name = str(breach).strip()
+            if not name:
+                continue
+            results.append(
+                AdapterResult(
+                    source=self.name,
+                    target=email,
+                    url=f"XposedOrNot breach exposure: {name}",
+                    platform="breach_exposure",
+                    confidence="medium",
+                    raw_reference=json.dumps(parsed, sort_keys=True),
+                )
+            )
+        if not results:
+            results.append(
+                AdapterResult(
+                    source=self.name,
+                    target=email,
+                    url=f"XposedOrNot breach exposure reported for {email}",
+                    platform="breach_exposure",
+                    confidence="medium",
+                    raw_reference=json.dumps(parsed, sort_keys=True),
+                )
+            )
+        return results
+
+
 class WebDomainAdapter(BaseSourceAdapter):
     name = "web_domain"
     description = "Probe public HTTP/HTTPS endpoints and TLS certificate metadata for a domain."
@@ -1421,6 +1564,51 @@ def _email_entity_type(platform: str) -> str:
     if normalized == "breach_exposure":
         return "breach_exposure"
     return "note"
+
+
+def _xposedornot_is_not_found(parsed: dict[str, Any]) -> bool:
+    combined = " ".join(
+        str(parsed.get(key) or "")
+        for key in ("Error", "error", "message", "Message", "detail")
+    ).lower()
+    return "not found" in combined or "not breached" in combined or "not exposed" in combined
+
+
+def _xposedornot_breach_names(parsed: Any) -> list[str]:
+    if not isinstance(parsed, dict):
+        return []
+    raw_breaches = parsed.get("breaches")
+    if isinstance(raw_breaches, dict):
+        raw_breaches = raw_breaches.get("breaches_details") or raw_breaches.get("details")
+    if not isinstance(raw_breaches, list):
+        return []
+    names: list[str] = []
+    for item in raw_breaches:
+        for name in _xposedornot_names_from_item(item):
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _xposedornot_names_from_item(item: Any) -> list[str]:
+    if isinstance(item, str):
+        return [item.strip()] if item.strip() else []
+    if isinstance(item, list):
+        names: list[str] = []
+        for nested in item:
+            names.extend(_xposedornot_names_from_item(nested))
+        return names
+    if isinstance(item, dict):
+        name = str(
+            item.get("breach")
+            or item.get("name")
+            or item.get("Name")
+            or item.get("title")
+            or item.get("Title")
+            or ""
+        ).strip()
+        return [name] if name else []
+    return []
 
 
 def _web_entity_type(platform: str) -> str:

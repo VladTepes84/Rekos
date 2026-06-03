@@ -19,6 +19,7 @@ from .web_osint import (
     RdapDomainAdapter,
     WaybackUrlAdapter,
     WebDomainAdapter,
+    XposedOrNotBreachAdapter,
 )
 from .wmn import WmnUsernameAdapter
 
@@ -74,5 +75,6 @@ def default_registry() -> SourceAdapterRegistry:
             WebDomainAdapter(),
             WaybackUrlAdapter(),
             WmnUsernameAdapter(),
+            XposedOrNotBreachAdapter(),
         ]
     )

@@ -3,7 +3,13 @@
 from .base import AdapterResult, BaseSourceAdapter, SourceRunResult
 from .maigret import MaigretAdapter
 from .sherlock import SherlockAdapter, SherlockUsernameAdapter
-from .web_osint import DnsDomainAdapter, EmailEnrichmentAdapter, EmailPassiveAdapter, HibpBreachAdapter
+from .web_osint import (
+    DnsDomainAdapter,
+    EmailEnrichmentAdapter,
+    EmailPassiveAdapter,
+    HibpBreachAdapter,
+    XposedOrNotBreachAdapter,
+)
 from .wmn import WmnUsernameAdapter
 
 __all__ = [
@@ -18,4 +24,5 @@ __all__ = [
     "SherlockUsernameAdapter",
     "SourceRunResult",
     "WmnUsernameAdapter",
+    "XposedOrNotBreachAdapter",
 ]

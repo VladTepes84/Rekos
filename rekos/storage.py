@@ -2564,6 +2564,30 @@ def _findings_from_adapter_results(results: list[AdapterResult]) -> list[_Findin
                 )
                 continue
 
+        if source == "xposedornot_breach":
+            if result.platform == "breach_exposure":
+                findings.append(
+                    _FindingInput(
+                        finding_type="breach_exposure",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+            if result.platform == "breach_status":
+                findings.append(
+                    _FindingInput(
+                        finding_type="metadata_record",
+                        value=result.url,
+                        source=source,
+                        confidence=confidence,
+                        raw_reference=result.raw_reference,
+                    )
+                )
+                continue
+
         if source == "web_domain":
             finding_type = result.platform
             if finding_type in {"web_endpoint", "http_redirect", "tls_certificate"}:

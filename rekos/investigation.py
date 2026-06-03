@@ -239,7 +239,7 @@ def check_email_breach(case: str, email: str, store: CaseStore) -> MultiSourceIn
         case=case,
         target_type="email",
         target=normalized_email,
-        sources=("hibp_breach",),
+        sources=("xposedornot_breach", "hibp_breach"),
         entity_type="email",
         store=store,
     )
