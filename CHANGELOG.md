@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.5
+
+- Added free XposedOrNot breach status checks to `rekos check-breach`.
+- Kept Have I Been Pwned as an optional API-key source.
+
 ## 1.3.4
 
 - Added passive email enrichment and optional HIBP breach exposure workflow.
