@@ -1,4 +1,13 @@
 # REKOS
+
+![PyPI](https://img.shields.io/pypi/v/rekos?style=for-the-badge)
+![Python](https://img.shields.io/pypi/pyversions/rekos?style=for-the-badge)
+![License](https://img.shields.io/github/license/VladTepes84/Rekos?style=for-the-badge)
+![Stars](https://img.shields.io/github/stars/VladTepes84/Rekos?style=for-the-badge)
+![Downloads](https://img.shields.io/pypi/dm/rekos?style=for-the-badge)
+![OSINT](https://img.shields.io/badge/OSINT-Passive-orange?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Active_Development-success?style=for-the-badge)
+
 ![REKOS quickstart](assets/rekos-quickstart-v2.png)
 
 REKOS is a terminal-native passive OSINT CLI for local-first public-source investigation workspaces. It helps organize targets, evidence, source outputs, entities, relationships, normalized findings, and correlation-quality scores in a SQLite-backed case folder.
