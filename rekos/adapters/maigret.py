@@ -34,7 +34,7 @@ class MaigretAdapter(BaseSourceAdapter):
         command = _resolve_maigret_command()
         if command is None:
             raise ExternalToolMissingError("Missing username investigation tool: install maigret.")
-        output = _run_command([*command, "--print-found", "--", target], "maigret")
+        output = _run_command([*command, target], "maigret")
         return _raw_output(output.stdout, output.stderr)
 
     def parse_results(self, target: str, raw_output: str) -> list[AdapterResult]:
